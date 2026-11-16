@@ -1,0 +1,17 @@
+[package]
+name = "ntpterminal-domain"
+description = "ドメイン層: I/O を持たない純粋なモデル（時刻同期・パケット生成）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# コード上は `domain::...` で参照する（パッケージ名の接頭辞を省く）
+[lib]
+name = "domain"
+
+[dependencies]
+thiserror.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "ntpterminal-infrastructure"
+description = "インフラ層: ポートの実装（UDP 送受信・時計・疑似サーバ）。OS 固有のコードはここだけに置く"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# コード上は `infrastructure::...` で参照する（パッケージ名の接頭辞を省く）
+[lib]
+name = "infrastructure"
+
+[dependencies]
+domain.workspace = true
+application.workspace = true
+
+[lints]
+workspace = true
