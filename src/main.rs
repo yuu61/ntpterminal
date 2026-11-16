@@ -52,7 +52,7 @@ use crate::config::ConfigFile;
 /// `--config` を省略したときに読む設定ファイル（カレントディレクトリ。なければ読まない）
 const DEFAULT_CONFIG_PATH: &str = "config.toml";
 
-// ---- 既定値（コマンドラインにも設定ファイルにもないときに使う。ヘルプの「既定:」と揃える） ----
+// ---- 既定値（コマンドラインにも設定ファイルにもないときに使う。ヘルプの「既定:」や docs/configuration.md の表と揃える） ----
 const DEFAULT_INTERVAL_MS: u64 = 500;
 /// ポーリング間隔の下限（ミリ秒）。これより短い指定はこの値にする
 const MIN_INTERVAL_MS: u64 = 10;

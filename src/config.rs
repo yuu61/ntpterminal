@@ -5,7 +5,8 @@
 //!   手元の `config.toml` を読ませたくない（スクリプトなど）ときは `--config /dev/null`（空の設定。Windows では `NUL`）を渡す
 //! - キーはコマンドラインの長いオプションと同じ名前で、値の書き方も同じ（`--interval-ms 200` → `interval-ms = 200`）。
 //!   tui / once / stats に共通のもの（サーバ・タイムゾーン・送信方式）は最上位に、
-//!   そのサブコマンドだけのものは `[tui]` などの節に書く。全項目の例は `docs/config.example.toml`
+//!   そのサブコマンドだけのものは `[tui]` などの節に書く。全項目の例は `docs/config.example.toml`、
+//!   各項目の値と既定値は `docs/configuration.md`
 //! - GNSS 受信機を SNMP で読む指定（`snmp-community` など）は `[tui]` に書く。コミュニティ名を書いたファイルは
 //!   ほかの人に読ませない
 //! - 優先順位はコマンドライン → 設定ファイル → 既定値。真偽の項目（`trend` / `json` / `no-df`）は
@@ -386,6 +387,9 @@ mod tests {
     /// 全項目の例。テストでは `# key = value` の行のコメントを外し、すべての項目を有効にして読む。
     const EXAMPLE: &str = include_str!("../docs/config.example.toml");
 
+    /// 項目の説明。
+    const REFERENCE: &str = include_str!("../docs/configuration.md");
+
     /// 設定ファイルに書かないオプション（`help` / `version` は clap が足すもの）。
     const NOT_IN_FILE: [&str; 4] = ["allow-fast-poll", "config", "help", "version"];
 
@@ -462,6 +466,37 @@ mod tests {
                     "{} の {key} が docs/config.example.toml にない",
                     subcommand.get_name()
                 );
+            }
+        }
+    }
+
+    /// オプションを足したのに項目一覧（docs/configuration.md）に足し忘れることを防ぐ。
+    /// 一覧には、コマンドラインの書き方（`--key`）と設定ファイルのキー（`key`）の両方を載せる。
+    #[test]
+    fn reference_lists_every_command_line_option() {
+        let cli = Cli::command();
+        // 最上位（`--config`）とサブコマンド
+        for subcommand in iter::once(&cli).chain(cli.get_subcommands()) {
+            for arg in subcommand.get_arguments() {
+                let mut written = Vec::new();
+                if let Some(long) = arg.get_long() {
+                    if ["help", "version"].contains(&long) {
+                        continue;
+                    }
+                    written.push(format!("`--{long}`"));
+                }
+                // 位置引数（サーバ）は設定ファイルのキーだけを載せる
+                let key = arg.get_long().unwrap_or_else(|| arg.get_id().as_str());
+                if !NOT_IN_FILE.contains(&key) {
+                    written.push(format!("`{key}`"));
+                }
+                for text in written {
+                    assert!(
+                        REFERENCE.contains(&text),
+                        "{} の {text} が docs/configuration.md にない",
+                        subcommand.get_name()
+                    );
+                }
             }
         }
     }
