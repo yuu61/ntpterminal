@@ -28,7 +28,6 @@ const NO_VALUE: &str = "--";
 /// 注意: `●` は East Asian Ambiguous。端末の「曖昧幅」が半角（既定）であることを前提にしている。
 const STATUS_MARK: &str = "●";
 
-/// 情報欄の 1 行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InfoRow {
     pub label: &'static str,
@@ -36,7 +35,6 @@ pub struct InfoRow {
     pub color: Color,
 }
 
-/// 画面に出す内容。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenModel {
     pub title: String,

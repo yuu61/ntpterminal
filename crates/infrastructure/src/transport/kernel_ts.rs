@@ -119,7 +119,7 @@ impl KernelTimestamper {
         fallback
     }
 
-    /// 受け入れた受信の T4 を決める。T1 がカーネルの時刻だったときだけ、カーネルの受信時刻を使う。
+    /// 受け入れた受信の T4 を決める（T1 と出どころをそろえる）。
     pub fn choose_received(&self, kernel: Option<i128>, observed: LocalStamp) -> LocalStamp {
         let kernel_stamp = kernel.and_then(|nanos| rebase_kernel_time(nanos, observed));
         match (self.last_send_kernel, kernel_stamp) {
@@ -181,7 +181,6 @@ pub(crate) fn recv_with_timestamp_from<S: SockaddrLike>(
     Ok((message.bytes, timestamp, message.address))
 }
 
-/// エラーキューの 1 件。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct TxEntry {
     /// 送信時刻の通知なら、その送信の OPT_ID 番号

@@ -1,5 +1,3 @@
-//! `once` サブコマンドの出力。
-
 use std::net::SocketAddr;
 
 use application::usecase::{OnceError, OnceOutcome};
@@ -11,7 +9,6 @@ use crate::format::{
     leap_label,
 };
 
-/// 人が読む形式。
 pub fn render_text(
     server: SocketAddr,
     transport: &str,

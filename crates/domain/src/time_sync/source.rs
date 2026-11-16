@@ -15,7 +15,6 @@ const LEAP_UNSYNCHRONIZED: u8 = 3;
 const STRATUM_KISS_OF_DEATH: u8 = 0;
 const STRATUM_UNSYNCHRONIZED: u8 = 16;
 
-/// 時刻源の設定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SourceConfig {
     pub poll_interval: TimeDelta,
@@ -43,14 +42,10 @@ impl SourceConfig {
     }
 }
 
-/// 問い合わせの集計。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ExchangeStats {
-    /// 送信した回数（試行）
     pub attempts: u64,
-    /// 有効な応答を採用した回数（成功）
     pub successes: u64,
-    /// 応答がなかった回数
     pub timeouts: u64,
     /// 送受信のエラー（到達不能など）
     pub failures: u64,
@@ -65,7 +60,6 @@ pub struct ExchangeStats {
 pub struct Deadlines {
     /// 次に問い合わせる時刻（`None` = もう問い合わせない）
     pub next_poll: Option<PcTime>,
-    /// 応答待ちの期限
     pub response: Option<PcTime>,
     /// 自走に移る時刻
     pub stale: Option<PcTime>,
@@ -79,10 +73,7 @@ struct PendingExchange {
     deadline: PcTime,
 }
 
-/// 時刻源（サーバ 1 台）。集約ルート。
-///
-/// I/O を持たない。時刻はすべて引数で受け取り、起きたことを [`SyncEvent`] で返す。
-/// 時刻はすべてモノトニック時計（[`crate::shared_kernel::Timebase::Monotonic`]）で扱う。
+/// 時刻はすべて引数で受け取り（モノトニック時計）、起きたことを [`SyncEvent`] で返す。
 #[derive(Clone, Debug)]
 pub struct TimeSource {
     config: SourceConfig,
@@ -142,7 +133,6 @@ impl TimeSource {
         self.anchor
     }
 
-    /// 最後に採用した標本。
     pub fn last_sample(&self) -> Option<Sample> {
         self.last_sample
     }
@@ -156,7 +146,6 @@ impl TimeSource {
         self.server_info
     }
 
-    /// 最後に有効な応答を受け取った時刻。
     pub fn last_success(&self) -> Option<PcTime> {
         self.last_success
     }
@@ -178,7 +167,6 @@ impl TimeSource {
         }
     }
 
-    /// 問い合わせる時刻になっているか。
     pub fn is_poll_due(&self, now: PcTime) -> bool {
         self.next_poll
             .is_some_and(|at| now.is_at_or_after(at).unwrap_or(false))

@@ -1,4 +1,4 @@
-//! TUI（M2）: 大きい時計と情報欄。
+//! TUI: 大きい時計と情報欄。
 //!
 //! 同期は別スレッドの `SyncService` が行う。ここではチャネルで届く [`SyncSnapshot`] を受け取り、
 //! 毎フレーム描き直すだけで、集約には触らない。
@@ -20,7 +20,6 @@ use application::timestamping::TimestampingStatus;
 
 use crate::format::DisplayZone;
 
-/// 画面の設定。
 #[derive(Clone, Debug)]
 pub struct TuiConfig {
     /// 最上部の見出し（字間を空けて表示する）

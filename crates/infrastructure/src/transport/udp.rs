@@ -1,5 +1,3 @@
-//! 標準ライブラリの UDP ソケットによる送受信。
-
 use std::io::{self, ErrorKind};
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
 use std::sync::Arc;
@@ -20,7 +18,7 @@ const RECV_BUFFER_LEN: usize = 2048;
 ///
 /// `connect` しているので、OS がそのサーバ以外からのデータグラムを捨ててくれる。
 /// 時刻は既定ではユーザ空間で、送信の直前（T1）と受信の直後（T4）に読む。
-/// Linux ではカーネルのタイムスタンプも使える（[`Self::enable_kernel_timestamps`]）。
+/// Linux ではカーネルのタイムスタンプも使える（`enable_kernel_timestamps`）。
 pub struct UdpTransport {
     socket: UdpSocket,
     clock: Arc<dyn ClockPort>,
@@ -51,7 +49,7 @@ impl UdpTransport {
         })
     }
 
-    /// カーネルのタイムスタンプ（SO_TIMESTAMPING）を使う。権限は不要。
+    /// 権限は不要。
     #[cfg(target_os = "linux")]
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
@@ -110,7 +108,7 @@ impl PacketPort for UdpTransport {
     }
 }
 
-/// 受信のエラー。タイムアウトは Unix では WouldBlock、Windows では TimedOut になる。
+/// タイムアウトは Unix では WouldBlock、Windows では TimedOut になる。
 fn recv_error(error: io::Error) -> Result<Option<Inbound>, TransportError> {
     if matches!(
         error.kind(),

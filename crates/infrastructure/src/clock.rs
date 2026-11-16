@@ -1,5 +1,3 @@
-//! PC の時計（std の Instant / SystemTime）。
-
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use application::port::ClockPort;
@@ -38,7 +36,6 @@ impl ClockPort for SystemClock {
     }
 }
 
-/// [`SystemTime`] を NTP タイムスタンプに変換する。
 pub fn system_time_to_ntp(time: SystemTime) -> NtpTimestamp {
     let unix_nanos = match time.duration_since(UNIX_EPOCH) {
         Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),

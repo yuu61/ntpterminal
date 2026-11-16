@@ -8,7 +8,6 @@ use std::str::FromStr;
 
 /// Ethernet ヘッダの長さ（VLAN タグなし）。
 pub const ETHERNET_HEADER_LEN: usize = 14;
-/// 802.1Q VLAN タグの長さ。
 pub const VLAN_TAG_LEN: usize = 4;
 /// ARP パケット（Ethernet / IPv4）の長さ。
 pub const ARP_LEN: usize = 28;
@@ -17,7 +16,6 @@ pub const ETHERTYPE_IPV4: u16 = 0x0800;
 pub const ETHERTYPE_ARP: u16 = 0x0806;
 pub const ETHERTYPE_VLAN: u16 = 0x8100;
 
-/// MAC アドレス。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct MacAddr(pub [u8; 6]);
 
@@ -33,7 +31,6 @@ impl fmt::Display for MacAddr {
     }
 }
 
-/// MAC アドレスとして読めなかった。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("MAC アドレスは aa:bb:cc:dd:ee:ff の形式で指定してください")]
 pub struct MacParseError;
@@ -58,12 +55,10 @@ impl FromStr for MacAddr {
     }
 }
 
-/// 802.1Q の VLAN タグ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct VlanTag {
     /// 優先度（PCP、3 bit）
     pub pcp: u8,
-    /// DEI（1 bit）
     pub dei: bool,
     /// VLAN ID（12 bit）
     pub vid: u16,
@@ -83,7 +78,6 @@ impl VlanTag {
     }
 }
 
-/// Ethernet ヘッダの指定。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EthernetSpec {
     /// `Some` なら 802.1Q の VLAN タグを付ける
@@ -110,7 +104,6 @@ pub fn encode_ethernet(
     frame
 }
 
-/// 受信した Ethernet フレームの中身。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceivedFrame<'a> {
     pub destination: MacAddr,
@@ -122,14 +115,13 @@ pub struct ReceivedFrame<'a> {
     pub payload: &'a [u8],
 }
 
-/// Ethernet として読めなかった。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum FrameDecodeError {
     #[error("フレームが短すぎます")]
     TooShort,
 }
 
-/// Ethernet フレームを読む（VLAN タグは 1 段まで）。どんな入力でもパニックしない。
+/// VLAN タグは 1 段まで読む。
 pub fn decode_ethernet(frame: &[u8]) -> Result<ReceivedFrame<'_>, FrameDecodeError> {
     let header = frame
         .get(..ETHERNET_HEADER_LEN)
@@ -158,7 +150,6 @@ pub fn decode_ethernet(frame: &[u8]) -> Result<ReceivedFrame<'_>, FrameDecodeErr
     })
 }
 
-/// ARP の操作。
 pub const ARP_REQUEST: u16 = 1;
 pub const ARP_REPLY: u16 = 2;
 
@@ -185,7 +176,6 @@ impl ArpPacket {
     }
 }
 
-/// ARP パケットを組み立てる。
 pub fn encode_arp(packet: &ArpPacket) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(ARP_LEN);
     bytes.extend_from_slice(&1u16.to_be_bytes()); // ハードウェア種別: Ethernet
@@ -200,7 +190,6 @@ pub fn encode_arp(packet: &ArpPacket) -> Vec<u8> {
     bytes
 }
 
-/// ARP として読めなかった。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum ArpDecodeError {
     #[error("ARP パケットが短すぎます")]
@@ -209,7 +198,7 @@ pub enum ArpDecodeError {
     Unsupported,
 }
 
-/// ARP パケットを読む（Ethernet / IPv4 のものだけ）。どんな入力でもパニックしない。
+/// Ethernet / IPv4 の ARP だけを読む。
 pub fn decode_arp(bytes: &[u8]) -> Result<ArpPacket, ArpDecodeError> {
     let arp = bytes.get(..ARP_LEN).ok_or(ArpDecodeError::TooShort)?;
     if be_u16(&arp[0..2]) != 1 || be_u16(&arp[2..4]) != ETHERTYPE_IPV4 || arp[4] != 6 || arp[5] != 4

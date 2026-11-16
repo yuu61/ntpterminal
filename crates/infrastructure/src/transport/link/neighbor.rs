@@ -7,14 +7,11 @@ use std::net::Ipv4Addr;
 
 use domain::packet_crafting::MacAddr;
 
-/// 経路が有効
 const RTF_UP: u16 = 0x0001;
-/// ゲートウェイ経由
 const RTF_GATEWAY: u16 = 0x0002;
 /// 近隣表のエントリが完成している（MAC が分かっている）
 const ATF_COM: u32 = 0x02;
 
-/// 経路表の 1 行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Route {
     pub interface: String,

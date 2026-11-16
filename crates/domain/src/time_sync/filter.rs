@@ -1,5 +1,3 @@
-//! クロックフィルタ。
-
 use std::collections::VecDeque;
 
 use super::Sample;

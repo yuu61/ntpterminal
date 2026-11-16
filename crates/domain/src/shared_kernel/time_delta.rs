@@ -1,5 +1,3 @@
-//! 符号付きの時間差。
-
 use std::ops::{Add, Div, Mul, Neg, Sub};
 use std::time::Duration;
 

@@ -1,5 +1,3 @@
-//! 基準点。
-
 use super::Sample;
 use crate::shared_kernel::{NtpTimestamp, PcTime, Timebase, TimebaseMismatch};
 

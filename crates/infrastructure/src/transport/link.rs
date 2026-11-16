@@ -106,7 +106,6 @@ impl LinkTransport {
         })
     }
 
-    /// カーネルのタイムスタンプ（SO_TIMESTAMPING）を使う。
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
             &self.socket,

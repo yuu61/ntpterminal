@@ -10,12 +10,9 @@ use nix::libc;
 use nix::net::if_::if_nametoindex;
 use nix::sys::socket::{LinkAddr, SockaddrLike};
 
-/// ARPHRD_ETHER
 const ARPHRD_ETHER: u16 = 1;
-/// ARPHRD_LOOPBACK
 const ARPHRD_LOOPBACK: u16 = 772;
 
-/// レイヤ 2 の種類。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LinkKind {
     Ethernet,
@@ -23,7 +20,6 @@ pub(crate) enum LinkKind {
     Loopback,
 }
 
-/// 送信に使うインターフェース。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Interface {
     pub name: String,

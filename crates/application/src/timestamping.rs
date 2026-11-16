@@ -5,7 +5,7 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-/// タイムスタンプの取得状況。`Arc` で共有する。
+/// `Arc` で共有する。
 #[derive(Debug, Default)]
 pub struct TimestampingStatus {
     kernel_enabled: AtomicBool,
@@ -15,10 +15,8 @@ pub struct TimestampingStatus {
     last_was_kernel: AtomicBool,
 }
 
-/// ある瞬間の取得状況。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TimestampingCounts {
-    /// カーネルのタイムスタンプを有効にしたか
     pub kernel_enabled: bool,
     /// T1 と T4 の両方をカーネルの時刻で取れた受信の数
     pub kernel_samples: u64,
@@ -26,7 +24,6 @@ pub struct TimestampingCounts {
     pub user_samples: u64,
     /// 送信時刻（T1）をカーネルから取れなかった送信の数
     pub tx_misses: u64,
-    /// 直近の受信がカーネルの時刻だったか
     pub last_was_kernel: bool,
 }
 

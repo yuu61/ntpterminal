@@ -77,7 +77,7 @@ impl RawIpTransport {
         })
     }
 
-    /// カーネルのタイムスタンプ（SO_TIMESTAMPING）を使う。受信は raw ソケット、送信は IPPROTO_RAW のソケット。
+    /// 受信は raw ソケット、送信は IPPROTO_RAW のソケットで取る。
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
             &self.recv_socket,

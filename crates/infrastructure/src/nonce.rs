@@ -1,5 +1,3 @@
-//! 問い合わせごとのノンス。
-
 use std::collections::hash_map::RandomState;
 use std::hash::BuildHasher;
 
