@@ -153,8 +153,8 @@ mod tests {
             "GPS"
         );
         assert_eq!(
-            ReferenceId::interpret(Stratum::new(2), [192, 168, 92, 234]).to_string(),
-            "192.168.92.234"
+            ReferenceId::interpret(Stratum::new(2), [192, 168, 1, 123]).to_string(),
+            "192.168.1.123"
         );
     }
 

@@ -334,7 +334,7 @@ mod tests {
     fn config(footer: Option<&str>) -> TuiConfig {
         TuiConfig {
             title: "NTP CLOCK".into(),
-            server_label: "192.168.92.234".into(),
+            server_label: "192.168.1.123".into(),
             footer: footer.map(str::to_string),
             zone: DisplayZone::jst(),
             transport: "UDP ソケット".into(),
@@ -489,7 +489,7 @@ mod tests {
         let text = lines.join("\n");
         for expected in [
             "N T P   C L O C K",
-            "192.168.92.234",
+            "192.168.1.123",
             "2026-11-15 (日)  JST",
             "● 同期済み",
             "オフセット",

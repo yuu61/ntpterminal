@@ -60,7 +60,7 @@ enum Command {
 
 #[derive(Args)]
 struct TargetArgs {
-    /// NTP サーバ（例: 192.168.92.234 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123
+    /// NTP サーバ（例: 192.168.1.123 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123
     server: String,
     /// 結果を JSON で出力する
     #[arg(long)]
@@ -231,7 +231,7 @@ impl ZoneArgs {
 
 #[derive(Args)]
 struct TuiArgs {
-    /// NTP サーバ（例: 192.168.92.234 / 127.0.0.1:12300）。ポート省略時は 123
+    /// NTP サーバ（例: 192.168.1.123 / 127.0.0.1:12300）。ポート省略時は 123
     server: String,
     /// ポーリング間隔（ミリ秒）
     #[arg(long, default_value_t = 500)]

@@ -50,7 +50,7 @@ mod tests {
     fn allows_fast_polling_only_on_local_networks() {
         let fast = Duration::from_millis(500);
         for local in [
-            "192.168.92.234",
+            "192.168.1.123",
             "10.0.0.1",
             "172.16.0.1",
             "127.0.0.1",

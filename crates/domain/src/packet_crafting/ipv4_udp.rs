@@ -269,7 +269,7 @@ mod tests {
         let packet = encode_ipv4_udp(
             &template,
             addr("192.168.1.10:40000"),
-            addr("192.168.92.234:123"),
+            addr("192.168.1.123:123"),
             &payload,
         );
 
@@ -282,13 +282,13 @@ mod tests {
         assert_eq!(packet[8], 7);
         assert_eq!(packet[9], 17);
         assert_eq!(&packet[12..16], &[192, 168, 1, 10]);
-        assert_eq!(&packet[16..20], &[192, 168, 92, 234]);
+        assert_eq!(&packet[16..20], &[192, 168, 1, 123]);
         // チェックサム欄を含めて計算し直すと 0（正しい）
         assert_eq!(internet_checksum(&packet[..20]), 0);
         assert_eq!(
             udp_checksum(
                 Ipv4Addr::new(192, 168, 1, 10),
-                Ipv4Addr::new(192, 168, 92, 234),
+                Ipv4Addr::new(192, 168, 1, 123),
                 &packet[20..]
             ),
             0
@@ -296,7 +296,7 @@ mod tests {
 
         let received = decode_ipv4_udp(&packet).unwrap();
         assert_eq!(received.source, addr("192.168.1.10:40000"));
-        assert_eq!(received.destination, addr("192.168.92.234:123"));
+        assert_eq!(received.destination, addr("192.168.1.123:123"));
         assert_eq!((received.dscp, received.ecn, received.ttl), (46, 1, 7));
         assert_eq!(received.identification, 0x1234);
         assert!(received.dont_fragment);

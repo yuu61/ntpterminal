@@ -12,24 +12,24 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
 # 実行例
-cargo run -- tui 192.168.92.234 --footer "Sponsored by ..."   # 大きい時計（q / Esc / Ctrl+C で終了）
-cargo run -- once 192.168.92.234
-cargo run -- once 192.168.92.234 --json
-cargo run -- stats 192.168.92.234 --interval-ms 500 --count 20
+cargo run -- tui 192.168.1.123 --footer "Sponsored by ..."   # 大きい時計（q / Esc / Ctrl+C で終了）
+cargo run -- once 192.168.1.123
+cargo run -- once 192.168.1.123 --json
+cargo run -- stats 192.168.1.123 --interval-ms 500 --count 20
 cargo run -- sim-server --offset-ms -0.978      # 実機がないとき。別の端末で ↓
 cargo run -- stats 127.0.0.1:12300
 
 # raw-ip モード（Linux・root）: IPv4 / UDP ヘッダを自作して送る
-sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
+sudo ntpterminal tui 192.168.1.123 --transport raw-ip --dscp 46 --ttl 64
 #   ヘッダ指定: --ttl / --dscp / --ecn / --ip-id / --no-df / --udp-checksum compute|zero|0xNNNN
 #   送信元ポート: --source-port（udp / raw-ip / link 共通）
 
 # link モード（Linux・root）: Ethernet フレームから自作して送る（IP ヘッダはカーネルに書き換えられない）
-sudo ntpterminal tui 192.168.92.234 --transport link --vlan 10 --pcp 5 --dscp 46
+sudo ntpterminal tui 192.168.1.123 --transport link --vlan 10 --pcp 5 --dscp 46
 #   Ethernet の指定: --dst-mac（省略時は近隣表か ARP）/ --vlan / --pcp、IP の指定: --ip-checksum 0xNNNN
 
 # タイムスタンプ（Linux）: auto（既定）/ kernel / user
-ntpterminal stats 192.168.92.234 --timestamping kernel
+ntpterminal stats 192.168.1.123 --timestamping kernel
 ```
 
 ## アーキテクチャ（DDD + レイヤーごとのクレート）

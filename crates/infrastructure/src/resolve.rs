@@ -6,7 +6,7 @@ use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 /// NTP の標準ポート。
 pub const NTP_PORT: u16 = 123;
 
-/// "192.168.92.234" / "ntp.example.com" / "host:123" / "[::1]:123" などを解決する。
+/// "192.168.1.123" / "ntp.example.com" / "host:123" / "[::1]:123" などを解決する。
 /// ポートを省略したら 123。複数のアドレスがあれば IPv4 を優先する。
 pub fn resolve_server(input: &str) -> io::Result<SocketAddr> {
     let input = input.trim();
@@ -48,8 +48,8 @@ mod tests {
     #[test]
     fn defaults_to_ntp_port() {
         assert_eq!(
-            resolve_server("192.168.92.234").unwrap(),
-            "192.168.92.234:123".parse().unwrap()
+            resolve_server("192.168.1.123").unwrap(),
+            "192.168.1.123:123".parse().unwrap()
         );
         assert_eq!(resolve_server("::1").unwrap(), "[::1]:123".parse().unwrap());
     }
