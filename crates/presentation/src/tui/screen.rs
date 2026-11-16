@@ -16,7 +16,9 @@ use domain::time_sync::SyncState;
 use super::TuiConfig;
 use super::big_digits::{self, BigText};
 use super::theme;
-use crate::format::{format_clock, format_date, format_delay_ms, format_offset_ms, state_label};
+use crate::format::{
+    format_clock, format_date, format_delay_ms, format_offset_ms, state_label, timestamping_label,
+};
 
 /// 同期前の時計の表示。
 const CLOCK_PLACEHOLDER: &str = "--:--:--.---";
@@ -155,6 +157,19 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
             theme::TEXT,
         ),
         row("送信方式", Some(config.transport.clone()), theme::LABEL),
+        {
+            let counts = config.timestamping.counts();
+            let color = if counts.last_was_kernel {
+                theme::GOOD
+            } else {
+                theme::LABEL
+            };
+            row(
+                "タイムスタンプ",
+                Some(timestamping_label(&counts).to_string()),
+                color,
+            )
+        },
     ]
 }
 
@@ -323,6 +338,7 @@ mod tests {
             footer: footer.map(str::to_string),
             zone: DisplayZone::jst(),
             transport: "UDP ソケット".into(),
+            timestamping: std::sync::Arc::new(application::timestamping::TimestampingStatus::new()),
         }
     }
 
@@ -435,6 +451,7 @@ mod tests {
         assert_eq!(value("次回取得"), "9.0 秒後");
         assert_eq!(value("成功/試行"), "687/687");
         assert_eq!(value("送信方式"), "UDP ソケット");
+        assert_eq!(value("タイムスタンプ"), "ユーザ空間");
         assert_eq!(model.date.as_deref(), Some("2026-11-15 (日)"));
     }
 
@@ -447,7 +464,7 @@ mod tests {
             model
                 .rows
                 .iter()
-                .filter(|row| row.label != "送信方式")
+                .filter(|row| !matches!(row.label, "送信方式" | "タイムスタンプ"))
                 .all(|row| row.value == NO_VALUE)
         );
         let lines = render_text(&model, 80, 24);
