@@ -12,6 +12,7 @@ use application::port::ClockPort;
 use application::snapshot::SyncSnapshot;
 use domain::time_sync::DisplayClock;
 
+use super::trend::SampleHistory;
 use super::{TuiConfig, screen};
 
 /// 1 フレームの長さ（約 60fps）。
@@ -49,11 +50,14 @@ fn event_loop(
     snapshots: &Receiver<SyncSnapshot>,
 ) -> io::Result<()> {
     let mut latest: Option<SyncSnapshot> = None;
+    let mut history = SampleHistory::default();
     let mut display = DisplayClock::new();
     let mut next_frame = Instant::now();
     loop {
-        // 届いているスナップショットのうち最新のものだけを使う
+        // 画面には最新のものだけを使う。推移の履歴には、1 フレームの間に 2 回成功しても
+        // 落とさないよう、届いたものをすべて通す
         while let Ok(snapshot) = snapshots.try_recv() {
+            history.observe(&snapshot);
             latest = Some(snapshot);
         }
         let now = clock.now().mono;
@@ -63,7 +67,7 @@ fn event_loop(
                 .and_then(|snapshot| snapshot.anchor.as_ref()),
             now,
         );
-        let model = screen::build(config, latest.as_ref(), shown, now);
+        let model = screen::build(config, latest.as_ref(), &history, shown, now);
         let _: CompletedFrame<'_> =
             terminal.draw(|frame| frame.render_widget(&model, frame.area()))?;
 

@@ -16,6 +16,7 @@ use domain::time_sync::SyncState;
 use super::TuiConfig;
 use super::big_digits::{self, BigText};
 use super::theme;
+use super::trend::{self, SampleHistory, Trend};
 use crate::format::{
     format_clock, format_date, format_delay_ms, format_offset_ms, state_label, timestamping_label,
 };
@@ -47,16 +48,20 @@ pub(crate) struct ScreenModel {
     pub status: String,
     pub status_color: Color,
     pub rows: Vec<InfoRow>,
+    /// 測定値の推移。まだ測定値がなければ空
+    pub trends: Vec<Trend>,
     pub footer: Option<String>,
 }
 
 /// スナップショットと現在時刻から、画面に出す内容を組み立てる。
 ///
+/// - `history`: 推移のグラフに使う、これまでの測定値
 /// - `shown`: 大きい時計に出す時刻（[`domain::time_sync::DisplayClock`] の結果）
 /// - `now`: モノトニック時計の現在値（「何秒前」「何秒後」の計算に使う）
 pub(super) fn build(
     config: &TuiConfig,
     snapshot: Option<&SyncSnapshot>,
+    history: &SampleHistory,
     shown: Option<NtpTimestamp>,
     now: PcTime,
 ) -> ScreenModel {
@@ -79,6 +84,7 @@ pub(super) fn build(
         status,
         status_color,
         rows: info_rows(config, snapshot, now),
+        trends: trend::trends(history),
         footer: config.footer.clone(),
     }
 }
@@ -204,17 +210,32 @@ fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
 /// 座標の計算はすべて `u16` の飽和演算（`saturating_*`）で行う。端末を極端に縮めてもパニックしないように。
 impl Widget for &ScreenModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 / (空行 / 最下部の一文)
+        // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 /
+        //           (空行 / 推移) / (空行 / 最下部の一文)
         let rows = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
         let footer_rows = if self.footer.is_some() { 2 } else { 0 };
-        let fixed = 6u16.saturating_add(rows).saturating_add(footer_rows);
+        let base = 6u16.saturating_add(rows).saturating_add(footer_rows);
 
         // 時計は残りの高さと幅に収まる最大の倍率で描く。倍率 1 でも入らなければ普通の文字で出す
-        let scale = big_digits::fit_scale(
-            &self.clock,
-            area.width.saturating_sub(2),
-            area.height.saturating_sub(fixed),
-        );
+        let fit = |extra: u16| {
+            big_digits::fit_scale(
+                &self.clock,
+                area.width.saturating_sub(2),
+                area.height.saturating_sub(base.saturating_add(extra)),
+            )
+        };
+        let scale = fit(0);
+        // 推移は余った場所にだけ出す。出すと時計が縮む・普通の文字になる・横に入らないなら出さない
+        let trend_rows = trend::height(&self.trends).saturating_add(1);
+        let show_trends = !self.trends.is_empty()
+            && scale.is_some()
+            && fit(trend_rows) == scale
+            && trend::width(&self.trends) <= area.width;
+        let fixed = if show_trends {
+            base.saturating_add(trend_rows)
+        } else {
+            base
+        };
         let clock_height = scale.map_or(1, |factor| big_digits::size(&self.clock, factor).1);
         let total = fixed.saturating_add(clock_height);
         let mut y = area.y + area.height.saturating_sub(total) / 2;
@@ -266,6 +287,10 @@ impl Widget for &ScreenModel {
         y = y.saturating_add(1);
 
         y = render_info_rows(&self.rows, area, y, buf);
+        if show_trends {
+            trend::render(&self.trends, area, y.saturating_add(1), buf);
+            y = y.saturating_add(trend_rows);
+        }
 
         if let Some(footer) = self.footer.as_ref() {
             let line = Line::styled(footer.as_str(), Style::new().fg(theme::FOOTER));
@@ -387,12 +412,17 @@ mod tests {
         }
     }
 
+    /// 直近 3 回の測定値（オフセット -0.978 / -0.950 / -1.020 ms、遅延 0.423 / 0.400 / 0.452 ms）。
+    fn recent_history() -> SampleHistory {
+        trend::testing::history(&[(-978, 423), (-950, 400), (-1_020, 452)])
+    }
+
     /// 7 秒後（= 最終同期 7 秒前、次回取得 9 秒後）。
     fn seven_seconds_later() -> PcTime {
         PcTime::monotonic(8_000_423_000)
     }
 
-    /// 描画結果を文字にする。背景色付きの空白は `█`、全角文字の後ろの詰め物は飛ばす。
+    /// 描画結果を文字にする。背景色付きの空白は `█`（時計）と `#`（推移）、全角文字の後ろの詰め物は飛ばす。
     fn render_text(model: &ScreenModel, width: u16, height: u16) -> Vec<String> {
         let area = Rect::new(0, 0, width, height);
         let mut buf = Buffer::empty(area);
@@ -409,6 +439,8 @@ mod tests {
                     let cell = &buf[(x, y)];
                     if cell.symbol() == " " && cell.bg == theme::ACCENT {
                         line.push('█');
+                    } else if cell.symbol() == " " && cell.bg == theme::TREND {
+                        line.push('#');
                     } else {
                         line.push_str(cell.symbol());
                         skip = display_width(cell.symbol()).saturating_sub(1);
@@ -430,6 +462,7 @@ mod tests {
         let model = build(
             &config(None),
             Some(&snapshot),
+            &SampleHistory::default(),
             Some(shown),
             seven_seconds_later(),
         );
@@ -458,7 +491,13 @@ mod tests {
 
     #[test]
     fn shows_placeholders_before_first_reply() {
-        let model = build(&config(None), None, None, PcTime::monotonic(0));
+        let model = build(
+            &config(None),
+            None,
+            &SampleHistory::default(),
+            None,
+            PcTime::monotonic(0),
+        );
         assert_eq!(model.clock, CLOCK_PLACEHOLDER);
         assert_eq!(model.date, None);
         assert!(
@@ -480,6 +519,7 @@ mod tests {
         let model = build(
             &config(Some("Sponsored by Example Inc.")),
             Some(&snapshot),
+            &recent_history(),
             Some(shown),
             now,
         );
@@ -496,12 +536,84 @@ mod tests {
             "オフセット",
             "-0.978 ms",
             "687/687",
+            "直近 3 回の測定値",
+            "-0.950 ms",
+            "-1.020 ms",
+            "0.452 ms",
+            "0.400 ms",
             "Sponsored by Example Inc.",
         ] {
             assert!(text.contains(expected), "{expected} がありません");
         }
-        // 120 桁では倍率 2（100 桁 × 5 行）で描かれる
+        // 120 桁では倍率 2（100 桁 × 5 行）で描かれる。推移を出しても時計は縮まない
         assert_eq!(lines.iter().filter(|line| line.contains('█')).count(), 5);
+        // 推移の棒は 2 系列 × 2 行で、右端に新しい値が来る（段: オフセット 3,4,1 / 遅延 2,1,4）
+        let bar_rows: Vec<&String> = lines.iter().filter(|line| line.contains('#')).collect();
+        assert_eq!(bar_rows.len(), 4);
+        for (row, expected) in bar_rows.iter().zip([
+            " ▄#  -0.950 ms",
+            " ##▄ -1.020 ms",
+            "   # 0.452 ms",
+            " #▄# 0.400 ms",
+        ]) {
+            assert!(
+                row.ends_with(expected),
+                "{row:?} が {expected:?} で終わっていない"
+            );
+        }
+        // 最下部の一文は推移より下に出る
+        let row_of = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        assert!(row_of("直近 3 回の測定値") < row_of("Sponsored by Example Inc."));
+    }
+
+    #[test]
+    fn trends_never_shrink_the_clock() {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let config = config(Some("footer"));
+        let with = build(
+            &config,
+            Some(&snapshot),
+            &recent_history(),
+            Some(shown),
+            now,
+        );
+        let without = build(
+            &config,
+            Some(&snapshot),
+            &SampleHistory::default(),
+            Some(shown),
+            now,
+        );
+        // 300×30 は高さで倍率が決まる（推移を出すと倍率 4 → 2）。80×60 は推移が横に入らない。
+        // 80×24 は時計が倍率 1 でぎりぎり。どれも推移を出さず、出さないときと同じ画面になる
+        for (width, height) in [(300, 30), (80, 60), (80, 24)] {
+            let lines = render_text(&with, width, height);
+            assert_eq!(
+                lines,
+                render_text(&without, width, height),
+                "{width}×{height}"
+            );
+            assert!(
+                !lines
+                    .join(
+                        "
+"
+                    )
+                    .contains("測定値"),
+                "{width}×{height}"
+            );
+        }
+        // 余裕があれば出す
+        assert!(
+            render_text(&with, 300, 60)
+                .join(
+                    "
+"
+                )
+                .contains("直近 3 回の測定値")
+        );
     }
 
     #[test]
@@ -509,7 +621,13 @@ mod tests {
         let snapshot = synced_snapshot();
         let now = seven_seconds_later();
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
-        let model = build(&config(Some("footer")), Some(&snapshot), Some(shown), now);
+        let model = build(
+            &config(Some("footer")),
+            Some(&snapshot),
+            &recent_history(),
+            Some(shown),
+            now,
+        );
         for (width, height) in [
             (0, 0),
             (1, 1),
@@ -525,7 +643,13 @@ mod tests {
 
     #[test]
     fn falls_back_to_plain_text_when_too_narrow() {
-        let model = build(&config(None), None, None, PcTime::monotonic(0));
+        let model = build(
+            &config(None),
+            None,
+            &SampleHistory::default(),
+            None,
+            PcTime::monotonic(0),
+        );
         let lines = render_text(&model, 40, 24);
         assert!(lines.iter().any(|line| line.contains(CLOCK_PLACEHOLDER)));
     }
