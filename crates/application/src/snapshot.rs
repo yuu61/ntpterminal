@@ -1,7 +1,11 @@
 //! 読み取り用モデル: 表示側（CLI / TUI）が集約を直接触らずに済むようにする。
 
+use domain::receiver::ReceiverStatus;
 use domain::shared_kernel::{PcTime, TimeDelta};
 use domain::time_sync::{Anchor, ExchangeStats, Sample, ServerInfo, SyncState, TimeSource};
+
+use crate::acl::mib::MibProfile;
+use crate::usecase::MonitorError;
 
 /// ある瞬間の時刻源の状態。コピーして別スレッド（TUI）へ渡せる。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -18,6 +22,22 @@ pub struct SyncSnapshot {
     pub last_success: Option<PcTime>,
     pub next_poll: Option<PcTime>,
     pub awaiting_reply: bool,
+}
+
+/// 受信機の監視（[`crate::usecase::ReceiverMonitor`]）の状態。問い合わせのたびに TUI へ渡す。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ReceiverSnapshot {
+    /// 使っている MIB（判定する前と、判定できなかったときは `None`）
+    pub profile: Option<MibProfile>,
+    /// 最後に取れた受信機の状態。直近の問い合わせが失敗しても残るので、表示側は `last_error` を見て、
+    /// 今の値として出さないこと
+    pub status: Option<ReceiverStatus>,
+    /// 最後に取れた時刻（モノトニック時計）
+    pub last_success: Option<PcTime>,
+    /// 直近の問い合わせの失敗。成功したら `None` に戻る
+    pub last_error: Option<MonitorError>,
+    pub attempts: u64,
+    pub successes: u64,
 }
 
 impl SyncSnapshot {
