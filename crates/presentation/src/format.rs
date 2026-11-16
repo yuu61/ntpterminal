@@ -1,6 +1,6 @@
 //! 表示用の整形（日時・時間差・状態・文字幅）。
 
-use application::timestamping::TimestampingCounts;
+use application::timestamping::{TimestampSource, TimestampingCounts};
 use domain::shared_kernel::{NtpTimestamp, TimeDelta};
 use domain::time_sync::{LeapIndicator, SyncState};
 
@@ -248,24 +248,39 @@ pub const fn leap_key(leap: LeapIndicator) -> &'static str {
     }
 }
 
-/// タイムスタンプの出どころ（直近の受信）。カーネルの時刻が取れていないことを隠さない。
+/// タイムスタンプの出どころ（直近の受信）。設定した出どころの時刻が取れていないことを隠さない。
 #[must_use]
 pub const fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
     if !counts.kernel_enabled {
-        "ユーザ空間"
-    } else if counts.kernel_samples == 0 && counts.user_samples == 0 {
-        "カーネル（応答待ち）"
-    } else if counts.last_was_kernel {
-        "カーネル"
-    } else {
-        "ユーザ空間（カーネルの時刻が取れない）"
+        return "ユーザ空間";
+    }
+    if counts.samples() == 0 {
+        return if counts.hardware_enabled {
+            "ハードウェア（応答待ち）"
+        } else {
+            "カーネル（応答待ち）"
+        };
+    }
+    match counts.last_source {
+        TimestampSource::Hardware => "ハードウェア",
+        TimestampSource::Kernel if counts.hardware_enabled => {
+            "カーネル（ハードウェアの時刻が取れない）"
+        }
+        TimestampSource::Kernel => "カーネル",
+        TimestampSource::User => "ユーザ空間（カーネルの時刻が取れない）",
     }
 }
 
 /// タイムスタンプの内訳: "カーネル 12 回 / ユーザ空間 0 回（送信時刻なし 0 回）"
+/// （ハードウェアのときは先頭に "ハードウェア 12 回 / " が付く）
 #[must_use]
 pub fn timestamping_breakdown(counts: &TimestampingCounts) -> String {
-    if counts.kernel_enabled {
+    if counts.hardware_enabled {
+        format!(
+            "ハードウェア {} 回 / カーネル {} 回 / ユーザ空間 {} 回（送信時刻なし {} 回）",
+            counts.hardware_samples, counts.kernel_samples, counts.user_samples, counts.tx_misses
+        )
+    } else if counts.kernel_enabled {
         format!(
             "カーネル {} 回 / ユーザ空間 {} 回（送信時刻なし {} 回）",
             counts.kernel_samples, counts.user_samples, counts.tx_misses
@@ -405,5 +420,84 @@ mod tests {
         assert_eq!(display_width("オフセット"), 10);
         assert_eq!(display_width("Stratum"), 7);
         assert_eq!(pad_to_width("遅延", 8), "遅延    ");
+    }
+
+    #[test]
+    fn timestamping_label_does_not_hide_fallbacks() {
+        let user = TimestampingCounts::default();
+        assert_eq!(timestamping_label(&user), "ユーザ空間");
+
+        let kernel = TimestampingCounts {
+            kernel_enabled: true,
+            ..TimestampingCounts::default()
+        };
+        assert_eq!(timestamping_label(&kernel), "カーネル（応答待ち）");
+        let kernel_ok = TimestampingCounts {
+            kernel_samples: 1,
+            last_source: TimestampSource::Kernel,
+            ..kernel
+        };
+        assert_eq!(timestamping_label(&kernel_ok), "カーネル");
+
+        let hardware = TimestampingCounts {
+            hardware_enabled: true,
+            ..kernel
+        };
+        assert_eq!(timestamping_label(&hardware), "ハードウェア（応答待ち）");
+        let hardware_ok = TimestampingCounts {
+            hardware_samples: 1,
+            last_source: TimestampSource::Hardware,
+            ..hardware
+        };
+        assert_eq!(timestamping_label(&hardware_ok), "ハードウェア");
+        let hardware_fell_back = TimestampingCounts {
+            kernel_samples: 1,
+            last_source: TimestampSource::Kernel,
+            ..hardware_ok
+        };
+        assert_eq!(
+            timestamping_label(&hardware_fell_back),
+            "カーネル（ハードウェアの時刻が取れない）"
+        );
+        let user_fallback = TimestampingCounts {
+            user_samples: 1,
+            last_source: TimestampSource::User,
+            ..hardware_ok
+        };
+        assert_eq!(
+            timestamping_label(&user_fallback),
+            "ユーザ空間（カーネルの時刻が取れない）"
+        );
+    }
+
+    #[test]
+    fn timestamping_breakdown_lists_hardware_only_when_enabled() {
+        let kernel = TimestampingCounts {
+            kernel_enabled: true,
+            kernel_samples: 3,
+            user_samples: 1,
+            tx_misses: 1,
+            ..TimestampingCounts::default()
+        };
+        assert_eq!(
+            timestamping_breakdown(&kernel),
+            "カーネル 3 回 / ユーザ空間 1 回（送信時刻なし 1 回）"
+        );
+        let hardware = TimestampingCounts {
+            hardware_enabled: true,
+            hardware_samples: 18,
+            kernel_samples: 2,
+            user_samples: 0,
+            tx_misses: 0,
+            ..kernel
+        };
+        assert_eq!(
+            timestamping_breakdown(&hardware),
+            "ハードウェア 18 回 / カーネル 2 回 / ユーザ空間 0 回（送信時刻なし 0 回）"
+        );
+        assert_eq!(
+            timestamping_breakdown(&TimestampingCounts::default()),
+            "ユーザ空間"
+        );
     }
 }

@@ -23,7 +23,8 @@ use domain::packet_crafting::{HeaderTemplate, decode_ipv4_udp, encode_ipv4_udp};
 use domain::shared_kernel::LocalStamp;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-use super::kernel_ts::{KernelTimestamper, recv_with_timestamp};
+use super::hardware_ts::HardwareClock;
+use super::kernel_ts::{KernelTimes, KernelTimestamper, recv_with_timestamp};
 use super::udp::bind_connected;
 
 /// `IPPROTO_RAW`（IP ヘッダを含めて送る raw ソケット）。
@@ -108,6 +109,27 @@ impl RawIpTransport {
         Ok(())
     }
 
+    /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
+    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。
+    ///
+    /// # Errors
+    ///
+    /// 経路の NIC がハードウェアタイムスタンプに対応していない、権限がない、またはソケットに設定できないとき。
+    pub fn enable_hardware_timestamps(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<String> {
+        let hardware = HardwareClock::prepare((*self.local.ip()).into())?;
+        let description = hardware.description();
+        self.kernel = Some(KernelTimestamper::enable_hardware(
+            &self.recv_socket,
+            &self.send_socket,
+            status,
+            hardware,
+        )?);
+        Ok(description)
+    }
+
     /// 送信元（IP ヘッダに入れているアドレスとポート）。
     #[must_use]
     pub const fn local_addr(&self) -> SocketAddrV4 {
@@ -115,13 +137,13 @@ impl RawIpTransport {
     }
 
     /// 受信用 raw ソケットから 1 件読む。カーネルのタイムスタンプを使うときは受信時刻も返す。
-    fn receive_once(&mut self) -> io::Result<(usize, Option<i128>)> {
+    fn receive_once(&mut self) -> io::Result<(usize, KernelTimes)> {
         if self.kernel.is_some() {
             recv_with_timestamp(&self.recv_socket, &mut self.buf)
         } else {
             (&self.recv_socket)
                 .read(&mut self.buf)
-                .map(|len| (len, None))
+                .map(|len| (len, KernelTimes::default()))
         }
     }
 
@@ -168,7 +190,7 @@ impl PacketPort for RawIpTransport {
                 .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))
                 .map_err(|error| TransportError::Io(error.to_string()))?;
             match self.receive_once() {
-                Ok((len, kernel_time)) => {
+                Ok((len, kernel_times)) => {
                     let observed = self.clock.now();
                     let Ok(packet) = decode_ipv4_udp(&self.buf[..len]) else {
                         continue;
@@ -176,7 +198,7 @@ impl PacketPort for RawIpTransport {
                     if packet.source == self.server && packet.destination == self.local {
                         // 受け入れるパケットだけについて、T4 の出どころを決める（記録も）
                         let received = self.kernel.as_ref().map_or(observed, |kernel| {
-                            kernel.choose_received(kernel_time, observed)
+                            kernel.choose_received(kernel_times, observed)
                         });
                         return Ok(Some(Inbound {
                             payload: packet.payload.to_vec(),

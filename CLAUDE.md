@@ -42,5 +42,5 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 - 公開 NTP サーバに短い間隔で問い合わせない（手動の確認でも）。
 
 各部分の決まりごととその理由は、モジュール先頭のドキュメントコメントに書いてある
-（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`tui/big_digits.rs`、
+（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`transport/hardware_ts.rs`、`tui/big_digits.rs`、
 GNSS 受信機を SNMP で読む部分は `acl/mib.rs` と `usecase/receiver_monitor.rs`）。

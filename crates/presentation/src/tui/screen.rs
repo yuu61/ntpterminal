@@ -10,6 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
+use application::timestamping::TimestampSource;
 use domain::shared_kernel::{NtpTimestamp, PcTime, TimeDelta};
 use domain::time_sync::SyncState;
 
@@ -180,7 +181,10 @@ fn info_rows(
         row("送信方式", Some(config.transport.clone()), theme::LABEL),
         {
             let counts = config.timestamping.counts();
-            let color = if counts.last_was_kernel {
+            // カーネルかハードウェアの時刻が、設定どおりに取れているときだけ「良好」の色にする
+            let color = if counts.last_source != TimestampSource::User
+                && counts.last_source == counts.expected_source()
+            {
                 theme::GOOD
             } else {
                 theme::LABEL

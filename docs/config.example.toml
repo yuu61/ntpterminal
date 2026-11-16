@@ -22,7 +22,7 @@
 
 # 送信方式: udp（既定）/ raw-ip / link。raw-ip と link は Linux のみで、root か CAP_NET_RAW が必要
 # transport = "link"
-# タイムスタンプ: auto（既定）/ kernel / user
+# タイムスタンプ: auto（既定）/ kernel / user / hardware（NIC の時計。Linux のみ・root。NIC で無効なら有効にして終了時に戻す）
 # timestamping = "auto"
 # 送信元ポート（省略時は OS に任せる）
 # source-port = 40000
