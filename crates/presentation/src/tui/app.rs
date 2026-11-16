@@ -3,6 +3,7 @@
 use core::time::Duration;
 use std::io;
 use std::sync::mpsc::Receiver;
+use std::thread;
 use std::time::Instant;
 
 use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
@@ -87,16 +88,19 @@ fn event_loop(
         let _: CompletedFrame<'_> =
             terminal.draw(|frame| frame.render_widget(&model, frame.area()))?;
 
-        // 次のフレームの時刻まで入力を待つ（遅れたときは追いつこうとしない）
+        // 次のフレームの時刻まで眠り、届いている入力を読む（遅れたときは追いつこうとしない）。
+        // crossterm の poll に待ち時間を渡して入力を待つと、Windows ではミリ秒単位の OS の待ちになり
+        // 15.6 ms 刻みに丸められる（16 ms 待つつもりが 31 ms になる）。std の sleep は高分解能のタイマーを使う
         next_frame += FRAME_INTERVAL;
         let current = Instant::now();
         if next_frame < current {
             next_frame = current;
         }
-        if event::poll(next_frame - current)?
-            && event::read()?.as_key_press_event().is_some_and(is_quit)
-        {
-            return Ok(());
+        thread::sleep(next_frame - current);
+        while event::poll(Duration::ZERO)? {
+            if event::read()?.as_key_press_event().is_some_and(is_quit) {
+                return Ok(());
+            }
         }
     }
 }

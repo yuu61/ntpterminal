@@ -2,7 +2,9 @@
 
 use domain::receiver::ReceiverStatus;
 use domain::shared_kernel::{PcTime, TimeDelta};
-use domain::time_sync::{Anchor, ExchangeStats, Sample, ServerInfo, SyncState, TimeSource};
+use domain::time_sync::{
+    Anchor, ExchangeStats, FrequencyOffset, Sample, ServerInfo, SyncState, TimeSource,
+};
 
 use crate::acl::mib::MibProfile;
 use crate::usecase::MonitorError;
@@ -16,8 +18,10 @@ pub struct SyncSnapshot {
     /// 大きい時計の基準点
     pub anchor: Option<Anchor>,
     pub last_sample: Option<Sample>,
-    /// クロックフィルタが選んだ標本（直近で往復遅延が最小）
+    /// クロックフィルタが選んだ標本（直近で「往復遅延の半分 + 古さ × 15 ppm」が最小）
     pub selected_sample: Option<Sample>,
+    /// サーバの時計がモノトニック時計より速く進む割合の推定値（基準点の補正に使っている値。推定前は `None`）
+    pub frequency: Option<FrequencyOffset>,
     pub server_info: Option<ServerInfo>,
     pub last_success: Option<PcTime>,
     pub next_poll: Option<PcTime>,
@@ -50,6 +54,7 @@ impl SyncSnapshot {
             anchor: source.anchor(),
             last_sample: source.last_sample(),
             selected_sample: source.selected_sample(),
+            frequency: source.frequency(),
             server_info: source.server_info(),
             last_success: source.last_success(),
             next_poll: source.deadlines().next_poll,

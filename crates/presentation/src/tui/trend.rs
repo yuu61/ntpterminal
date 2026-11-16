@@ -250,6 +250,7 @@ pub(super) mod testing {
             anchor: None,
             last_sample: Some(sample),
             selected_sample: Some(sample),
+            frequency: None,
             server_info: None,
             last_success: None,
             next_poll: None,

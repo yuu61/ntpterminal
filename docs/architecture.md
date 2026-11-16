@@ -58,11 +58,17 @@ domain と application は I/O を持たないため、時刻同期の振る舞�
 
 1. 問い合わせのたびに、T1〜T4 からオフセット（壁時計を使用）と遅延（モノトニック時計を使用）を求める
    （[`time_sync/sample.rs`](../crates/domain/src/time_sync/sample.rs)）
-2. 直近の測定結果のうち、遅延が最も小さいものを選ぶ。NTP のクロックフィルタと同じ考え方である
+2. 新しい測定結果が、それまでの基準点と同じ時間の流れに乗っているかを確かめる。遅延の半分と時計のずれの見込みを
+   超えて食い違えば保留し、次の測定結果もそれと合えば時刻の段差（サーバの時刻の修正・閏秒・PC のスリープ）とみなして、
+   それまでの測定結果を捨てる（[`time_sync/continuity.rs`](../crates/domain/src/time_sync/continuity.rs)）
+3. 直近の測定結果のうち、「遅延の半分 + 古さ × 15 ppm」が最も小さいものを選ぶ。NTP のクロックフィルタと同じ考え方で、
+   古い測定結果ほど、そこから時刻を進める間に時計の進み方の差でずれることを見込む
    （[`time_sync/filter.rs`](../crates/domain/src/time_sync/filter.rs)）
-3. 選んだ測定結果から、「モノトニック時計がこの値のとき、サーバ時刻はこの値だった」という基準点（アンカー）を作る
+4. 選んだ測定結果から、「モノトニック時計がこの値のとき、サーバ時刻はこの値だった」という基準点（アンカー）を作る
    （[`time_sync/anchor.rs`](../crates/domain/src/time_sync/anchor.rs)）
-4. 基準点から、モノトニック時計の経過時間だけ時刻を進めて表示する。基準点が切り替わったときに生じるずれは、
+5. 基準点から、モノトニック時計の経過時間だけ時刻を進めて表示する。PC のモノトニック時計とサーバの時計の進み方の差は、
+   1 分以上の測定結果から推定して補正する（自走中もこの補正で進め続ける。
+   [`time_sync/frequency.rs`](../crates/domain/src/time_sync/frequency.rs)）。基準点が切り替わったときに生じるずれは、
    表示が逆戻りしないよう少しずつ吸収する（[`time_sync/display_clock.rs`](../crates/domain/src/time_sync/display_clock.rs)）
 
 応答の検証（mode、Originate Timestamp の照合、KoD、LI など）と、同期状態（未同期・同期済み・自走・拒否）の遷移は

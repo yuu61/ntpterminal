@@ -1,10 +1,18 @@
 //! 集約ルート [`TimeSource`]（時刻源 = サーバ 1 台）。
+//!
+//! - 採用した標本は、それまでの基準点と同じ時間の流れに乗っているか確かめてから使う（`continuity`）。
+//!   食い違う標本は保留し、次の標本もそれと合えば時刻の段差とみなして、それまでの標本を捨てる。
+//!   次の標本が元の流れに合えば、保留した標本は一時的な外れとして使わない
+//! - 次に問い合わせる時刻は、前回の予定の時刻から数える（起きるのが遅れた分を次に持ち越さない。
+//!   Windows の待ちは 15.6 ms 刻みなので、送った時刻から数えると間隔が毎回延びる）。
+//!   1 回分以上遅れたときは、送った時刻から数え直す（遅れを取り戻すために続けて送らない）
 
 use core::ops::RangeInclusive;
 
+use super::continuity::{is_continuous, residual};
 use super::{
-    Anchor, ClockFilter, KissCode, LeapIndicator, ReferenceId, RejectReason, Sample, ServerInfo,
-    ServerReply, Stratum, SyncEvent, SyncState,
+    Anchor, ClockFilter, FrequencyEstimator, FrequencyOffset, KissCode, LeapIndicator, ReferenceId,
+    RejectReason, Sample, ServerInfo, ServerReply, Stratum, SyncEvent, SyncState,
 };
 use crate::shared_kernel::{LocalStamp, NtpTimestamp, PcTime, TimeDelta};
 
@@ -83,6 +91,9 @@ pub struct TimeSource {
     next_poll: Option<PcTime>,
     pending: Option<PendingExchange>,
     filter: ClockFilter,
+    frequency: FrequencyEstimator,
+    /// それまでの基準点と食い違った標本。次の標本で、時刻の段差か一時的な外れかを確かめる
+    suspect: Option<Sample>,
     anchor: Option<Anchor>,
     last_sample: Option<Sample>,
     server_info: Option<ServerInfo>,
@@ -102,6 +113,8 @@ impl TimeSource {
             next_poll: Some(now),
             pending: None,
             filter: ClockFilter::new(config.filter_len),
+            frequency: FrequencyEstimator::new(),
+            suspect: None,
             anchor: None,
             last_sample: None,
             server_info: None,
@@ -145,10 +158,16 @@ impl TimeSource {
         self.last_sample
     }
 
-    /// クロックフィルタが選んだ標本（直近の中で往復遅延が最小）。
+    /// クロックフィルタが選んだ標本（直近の中で「往復遅延の半分 + 古さ × 15 ppm」が最小）。
     #[must_use]
     pub fn selected_sample(&self) -> Option<Sample> {
         self.filter.best().copied()
+    }
+
+    /// サーバの時計がモノトニック時計より速く進む割合の推定値。まだ推定できていなければ `None`。
+    #[must_use]
+    pub const fn frequency(&self) -> Option<FrequencyOffset> {
+        self.frequency.estimate()
     }
 
     #[must_use]
@@ -207,7 +226,7 @@ impl TimeSource {
             deadline: sent.mono.saturating_add(self.config.response_timeout),
         });
         if self.state != SyncState::Denied {
-            self.next_poll = Some(sent.mono.saturating_add(self.poll_interval));
+            self.next_poll = Some(self.following_poll(sent.mono));
         }
         events.push(SyncEvent::ExchangeStarted { seq });
         events
@@ -270,23 +289,64 @@ impl TimeSource {
 
     // ---- 内部 ----
 
+    /// `sent` に送った次の問い合わせの時刻。前回の予定の時刻から数え、1 回分以上遅れていたら `sent` から数え直す。
+    fn following_poll(&self, sent: PcTime) -> PcTime {
+        let on_schedule = self
+            .next_poll
+            .map(|due| due.saturating_add(self.poll_interval))
+            .filter(|&at| sent.is_at_or_after(at) == Ok(false));
+        on_schedule.unwrap_or_else(|| sent.saturating_add(self.poll_interval))
+    }
+
     fn accept(&mut self, seq: u64, sample: Sample, server_info: ServerInfo) -> Vec<SyncEvent> {
-        let mut events = Vec::new();
-        self.stats.successes += 1;
-        self.filter.push(sample);
-        if let Some(Ok(anchor)) = self.filter.best().map(Anchor::from_sample) {
-            self.anchor = Some(anchor);
-        }
-        self.last_sample = Some(sample);
-        self.server_info = Some(server_info);
-        self.last_success = Some(sample.received().mono);
-        events.push(SyncEvent::SampleAccepted {
+        let mut events = vec![SyncEvent::SampleAccepted {
             seq,
             sample,
             server_info,
-        });
+        }];
+        self.stats.successes += 1;
+        self.last_sample = Some(sample);
+        self.server_info = Some(server_info);
+        self.last_success = Some(sample.received().mono);
+        self.track(sample, &mut events);
         self.transition(SyncState::Synchronized, &mut events);
         events
+    }
+
+    /// 標本を基準点の計算に取り込む。それまでの標本と食い違うときは保留し、次の標本で確かめる。
+    fn track(&mut self, sample: Sample, events: &mut Vec<SyncEvent>) {
+        let frequency = self.frequency.estimate();
+        let current = self.filter.best().copied();
+        if current.is_none_or(|best| is_continuous(&best, &sample, frequency)) {
+            self.suspect = None;
+            self.adopt(sample);
+            return;
+        }
+        match self.suspect.take() {
+            // 2 回続けて食い違い、その 2 つは互いに合っている: 時刻が段差で変わった
+            Some(previous) if is_continuous(&previous, &sample, frequency) => {
+                let step = current
+                    .and_then(|best| residual(&best, &sample, frequency.unwrap_or_default()))
+                    .unwrap_or_default();
+                self.filter.clear();
+                self.frequency.reset();
+                self.adopt(previous);
+                self.adopt(sample);
+                events.push(SyncEvent::ClockStepDetected { step });
+            }
+            // 1 回目の食い違い（または、保留していた標本とも合わない）: 保留して、まだ使わない
+            Some(_) | None => self.suspect = Some(sample),
+        }
+    }
+
+    /// 標本をクロックフィルタと周波数の推定に入れ、基準点を作り直す。
+    fn adopt(&mut self, sample: Sample) {
+        self.filter.push(sample);
+        self.frequency.observe(&sample);
+        let frequency = self.frequency.estimate().unwrap_or_default();
+        if let Some(Ok(anchor)) = self.filter.best().map(Anchor::from_sample) {
+            self.anchor = Some(anchor.with_frequency(frequency));
+        }
     }
 
     fn reject(&mut self, pending: &PendingExchange, reason: RejectReason) -> Vec<SyncEvent> {
@@ -675,5 +735,131 @@ mod tests {
             src.last_sample().unwrap().delay().delta(),
             TimeDelta::from_millis(4),
         );
+    }
+
+    /// 問い合わせて、PC より `offset_us` 進んだサーバから片道 `one_way_us` で応答を受け取る。
+    fn exchange(
+        src: &mut TimeSource,
+        seq: u64,
+        sent_us: i64,
+        offset_us: i64,
+        one_way_us: i64,
+    ) -> Vec<SyncEvent> {
+        drop(src.begin_exchange(nonce(seq), stamp(sent_us)));
+        src.complete_exchange(
+            reply(nonce(seq), sent_us, offset_us, one_way_us),
+            stamp(sent_us + 2 * one_way_us),
+        )
+    }
+
+    fn has_step(events: &[SyncEvent]) -> bool {
+        events
+            .iter()
+            .any(|event| matches!(event, SyncEvent::ClockStepDetected { .. }))
+    }
+
+    #[test]
+    fn polls_on_schedule_even_when_sent_late() {
+        let mut src = source();
+        drop(src.begin_exchange(nonce(1), stamp(0)));
+        // 10ms 遅れて送っても、次は予定どおり 1 秒の時点
+        drop(src.begin_exchange(nonce(2), stamp(510_000)));
+        assert!(!src.is_poll_due(stamp(999_999).mono));
+        assert!(src.is_poll_due(stamp(1_000_000).mono));
+        // 1 回分以上遅れたら、送った時刻から数え直す（続けて送らない）
+        drop(src.begin_exchange(nonce(3), stamp(2_700_000)));
+        assert_eq!(src.deadlines().next_poll, Some(stamp(3_200_000).mono));
+    }
+
+    /// サーバの時計が PC のモノトニック時計より 35 ppm 速いとき、自走中も推定した周波数で補正し続ける。
+    #[test]
+    fn keeps_time_in_holdover_by_correcting_frequency() {
+        const PPM: i64 = 35;
+        let mut src = source();
+        for (index, sent_us) in (0i64..=120_000_000).step_by(500_000).enumerate() {
+            let drift_us = (sent_us + 100) * PPM / 1_000_000;
+            let events = exchange(&mut src, index as u64 + 1, sent_us, drift_us, 100);
+            assert!(!has_step(&events), "時計の進み方の差を段差と取り違えた");
+        }
+        let ppb = src.frequency().unwrap().ppb();
+        assert!((ppb - PPM * 1_000).abs() <= 200, "推定値 {ppb} ppb");
+
+        // 応答が止まって 10 分後
+        let later_us = 720_000_000i64;
+        let truth = stamp(later_us)
+            .wall
+            .wrapping_add(TimeDelta::from_micros(later_us * PPM / 1_000_000));
+        let projected = src.anchor().unwrap().project(stamp(later_us).mono).unwrap();
+        let error = projected.wrapping_since(truth);
+        // 補正しなければ 35 ppm × 600 秒 = 21ms ずれる
+        assert!(
+            error.abs() < TimeDelta::from_micros(200),
+            "自走 10 分後の誤差 {error:?}"
+        );
+    }
+
+    #[test]
+    fn follows_a_confirmed_step_of_the_server_time() {
+        let mut src = source();
+        for seq in 1..=6u64 {
+            let sent_us = (seq.cast_signed() - 1) * 500_000;
+            // 4 回目の遅延が最小（段差の後も、遅延だけならこれが選ばれ続ける）
+            let one_way = if seq == 4 { 60 } else { 100 };
+            drop(exchange(&mut src, seq, sent_us, 0, one_way));
+        }
+        let before = src.anchor().unwrap();
+
+        // サーバの時刻が 300ms 戻った。1 回目は保留して、基準点を変えない
+        let first = exchange(&mut src, 7, 3_000_000, -300_000, 150);
+        assert!(matches!(first[0], SyncEvent::SampleAccepted { seq: 7, .. }));
+        assert!(!has_step(&first));
+        assert_eq!(src.anchor(), Some(before));
+
+        // 2 回目も同じ時刻の流れなら、段差とみなして新しい時刻に合わせる
+        let second = exchange(&mut src, 8, 3_500_000, -300_000, 140);
+        let step = second.iter().find_map(|event| {
+            if let SyncEvent::ClockStepDetected { step } = *event {
+                Some(step)
+            } else {
+                None
+            }
+        });
+        assert_close(step.unwrap(), TimeDelta::from_millis(-300));
+        let now = stamp(3_600_000);
+        let projected = src.anchor().unwrap().project(now.mono).unwrap();
+        assert_close(
+            projected.wrapping_since(now.wall),
+            TimeDelta::from_millis(-300),
+        );
+        assert_eq!(src.filter.len(), 2, "段差の前の標本は捨てる");
+    }
+
+    #[test]
+    fn ignores_a_single_outlying_sample() {
+        let mut src = source();
+        for seq in 1..=4u64 {
+            drop(exchange(
+                &mut src,
+                seq,
+                (seq.cast_signed() - 1) * 500_000,
+                0,
+                100,
+            ));
+        }
+        // 遅延は最小だが、時刻が 50ms ずれた応答が 1 回だけ届く
+        let odd = exchange(&mut src, 5, 2_000_000, 50_000, 20);
+        assert!(!has_step(&odd));
+        let normal = exchange(&mut src, 6, 2_500_000, 0, 100);
+        assert!(!has_step(&normal));
+
+        let now = stamp(2_600_000);
+        let projected = src.anchor().unwrap().project(now.mono).unwrap();
+        assert_close(projected.wrapping_since(now.wall), TimeDelta::ZERO);
+        assert_close(
+            src.selected_sample().unwrap().offset().delta(),
+            TimeDelta::ZERO,
+        );
+        // 外れた標本も応答としては成功に数える
+        assert_eq!(src.stats().successes, 6);
     }
 }

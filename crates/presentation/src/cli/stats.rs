@@ -10,7 +10,7 @@ use alloc::sync::Arc;
 use application::port::EventSink;
 use application::snapshot::SyncSnapshot;
 use application::timestamping::TimestampingStatus;
-use domain::time_sync::SyncEvent;
+use domain::time_sync::{FrequencyOffset, SyncEvent};
 use serde_json::json;
 
 use super::render_rows;
@@ -164,11 +164,12 @@ impl<W: Write> StatsReporter<W> {
             rows.push((
                 "採用値",
                 format!(
-                    "offset {} / delay {}（直近で遅延が最小の標本）",
+                    "offset {} / delay {}（直近で遅延と古さから選んだ標本）",
                     format_offset_ms(selected.offset().delta()),
                     format_delay_ms(selected.delay().delta())
                 ),
             ));
+            rows.push(("周波数のずれ", frequency_text(snapshot.frequency)));
         }
         text.push_str(&render_rows(&rows));
         text
@@ -204,6 +205,10 @@ impl<W: Write> StatsReporter<W> {
                 "offset_ms": sample.offset().delta().as_millis_f64(),
                 "delay_ms": sample.delay().delta().as_millis_f64(),
             })),
+            "frequency_ppm": self
+                .last
+                .and_then(|snapshot| snapshot.frequency)
+                .map(FrequencyOffset::as_ppm_f64),
         })
         .to_string()
     }
@@ -242,6 +247,10 @@ impl<W: Write> StatsReporter<W> {
                 "       ポーリング間隔を変更: {} ms → {} ms",
                 from.as_millis_f64(),
                 to.as_millis_f64()
+            ),
+            SyncEvent::ClockStepDetected { step } => format!(
+                "       時刻の段差を検出: {}（それまでの測定を捨てて合わせ直した）",
+                format_offset_ms(*step)
             ),
             SyncEvent::StateChanged { from, to } => {
                 format!("       状態: {} → {}", state_label(*from), state_label(*to))
@@ -283,6 +292,10 @@ impl<W: Write> StatsReporter<W> {
                 "event": "poll_interval_changed",
                 "from_ms": from.as_millis_f64(),
                 "to_ms": to.as_millis_f64(),
+            }),
+            SyncEvent::ClockStepDetected { step } => json!({
+                "event": "step_detected",
+                "step_ms": step.as_millis_f64(),
             }),
             SyncEvent::StateChanged { from, to } => json!({
                 "event": "state_changed",
@@ -328,8 +341,22 @@ const fn finished_seq(event: &SyncEvent) -> Option<u64> {
         | SyncEvent::SampleRejected { .. }
         | SyncEvent::ExchangeFailed { .. }
         | SyncEvent::PollIntervalChanged { .. }
+        | SyncEvent::ClockStepDetected { .. }
         | SyncEvent::StateChanged { .. } => None,
     }
+}
+
+/// 周波数のずれの表示: "+34.912 ppm（…）"。まだ推定していなければその旨。
+fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
+    frequency.map_or_else(
+        || "推定前（1 分以上の測定が必要）".to_owned(),
+        |offset| {
+            format!(
+                "{:+.3} ppm（PC のモノトニック時計に対するサーバの時計の進み。時計の表示の補正に使う）",
+                offset.as_ppm_f64()
+            )
+        },
+    )
 }
 
 fn describe(stats: &RunningStats, signed: bool) -> String {

@@ -73,6 +73,7 @@ where
                 | SyncEvent::SampleRejected { .. }
                 | SyncEvent::ExchangeFailed { .. }
                 | SyncEvent::PollIntervalChanged { .. }
+                | SyncEvent::ClockStepDetected { .. }
                 | SyncEvent::StateChanged { .. } => {}
             }
         }
