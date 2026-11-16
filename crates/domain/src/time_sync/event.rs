@@ -84,6 +84,11 @@ pub enum SyncEvent {
         from: TimeDelta,
         to: TimeDelta,
     },
+    /// サーバ時刻とモノトニック時計の関係が段差で変わった（サーバの時刻の修正・閏秒・PC のスリープなど）。
+    /// それまでの標本を捨て、新しい時刻に合わせた。`step` は、それまでの基準点から推定した時刻に対する差
+    ClockStepDetected {
+        step: TimeDelta,
+    },
     StateChanged {
         from: SyncState,
         to: SyncState,

@@ -439,6 +439,7 @@ mod tests {
             anchor: Some(Anchor::from_sample(&sample).unwrap()),
             last_sample: Some(sample),
             selected_sample: Some(sample),
+            frequency: None,
             server_info: Some(server_info),
             last_success: Some(received.mono),
             next_poll: Some(PcTime::monotonic(17_000_000_000)),

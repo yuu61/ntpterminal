@@ -15,7 +15,7 @@ use application::snapshot::SyncSnapshot;
 use application::usecase::{OnceError, SyncService, query_once};
 use domain::packet_crafting::{NtpMessage, RequestTemplate, decode, encode};
 use domain::shared_kernel::{LocalStamp, NtpTimestamp, PcTime, TimeDelta};
-use domain::time_sync::{SourceConfig, SyncEvent, SyncState};
+use domain::time_sync::{FrequencyOffset, SourceConfig, SyncEvent, SyncState};
 
 const WALL_BASE: NtpTimestamp = NtpTimestamp::from_parts(3_900_000_000, 0);
 
@@ -52,9 +52,13 @@ impl ClockPort for FakeClock {
 struct SimPort {
     clock: Arc<FakeClock>,
     server_offset: TimeDelta,
+    /// サーバの時計が PC のモノトニック時計より速く進む割合
+    server_rate: FrequencyOffset,
     one_way: Duration,
     /// n 回目（1 始まり）の要求を落とすかどうか
     drop_request: fn(u64) -> bool,
+    /// n 回目（1 始まり）の要求のときに、サーバの時刻を `server_offset` からさらにずらす量（時刻の段差）
+    step: fn(u64) -> TimeDelta,
     sent: u64,
     in_flight: VecDeque<(u64, Vec<u8>)>,
 }
@@ -64,8 +68,10 @@ impl SimPort {
         Self {
             clock,
             server_offset,
+            server_rate: FrequencyOffset::ZERO,
             one_way,
             drop_request: |_| false,
+            step: |_| TimeDelta::ZERO,
             sent: 0,
             in_flight: VecDeque::new(),
         }
@@ -80,9 +86,15 @@ impl PacketPort for SimPort {
             return Ok(sent);
         }
         let request = decode(payload).map_err(|error| TransportError::Io(error.to_string()))?;
-        let server_time = sent
-            .wall
-            .wrapping_add(TimeDelta::from_std(self.one_way) + self.server_offset);
+        // サーバが要求を受け取った瞬間のサーバ時刻（PC の時刻 + offset + 進み方の差の累積）
+        let at_server = TimeDelta::from_nanos(sent.mono.nanos().cast_signed())
+            + TimeDelta::from_std(self.one_way);
+        let server_time = sent.wall.wrapping_add(
+            TimeDelta::from_std(self.one_way)
+                + self.server_offset
+                + (self.step)(self.sent)
+                + self.server_rate.drift_over(at_server),
+        );
         let reply = NtpMessage {
             version: 4,
             mode: NtpMessage::MODE_SERVER,
@@ -314,4 +326,102 @@ fn run_until_returns_when_stop_flag_is_set() {
     // 回数無制限でも、停止フラグで戻ってくる
     service.run_until(&mut sink, None, &stop);
     assert_eq!(service.snapshot().stats.successes, 3);
+}
+
+/// サーバの時計が PC のモノトニック時計より 35 ppm 速い。応答が止まった後も、推定した周波数で時刻を進める。
+#[test]
+fn holdover_corrects_for_the_frequency_offset() {
+    let rate = FrequencyOffset::from_ppb(35_000);
+    let clock = Arc::new(FakeClock::default());
+    let mut port = SimPort::new(
+        Arc::clone(&clock),
+        TimeDelta::ZERO,
+        Duration::from_micros(200),
+    );
+    port.server_rate = rate;
+    // 2 分（500ms × 240 回）で応答が止まる
+    port.drop_request = |n| n > 240;
+    let mut service = service(port, Arc::clone(&clock));
+    let mut recorder = Recorder::default();
+    service.run(&mut recorder, Some(250));
+
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.state, SyncState::Holdover);
+    let ppm = snapshot.frequency.unwrap().as_ppm_f64();
+    assert!((ppm - 35.0).abs() < 0.2f64, "推定値 {ppm} ppm");
+    assert!(
+        !recorder
+            .events
+            .iter()
+            .any(|event| matches!(event, SyncEvent::ClockStepDetected { .. })),
+        "進み方の差を時刻の段差と取り違えた"
+    );
+
+    // 応答が止まってから 10 分後。補正しなければ 35 ppm × 600 秒 = 21ms ずれる
+    let later = TimeDelta::from_secs(720);
+    let truth = WALL_BASE.wrapping_add(later + rate.drift_over(later));
+    let projected = snapshot
+        .anchor
+        .unwrap()
+        .project(PcTime::monotonic(later.as_nanos().cast_unsigned()))
+        .unwrap();
+    let error = projected.wrapping_since(truth);
+    assert!(
+        error.abs() < TimeDelta::from_micros(200),
+        "自走 10 分後の誤差 {error:?}"
+    );
+}
+
+/// サーバの時刻が途中で 300ms 戻ったら、2 回の応答で確かめてから新しい時刻に合わせる。
+#[test]
+fn follows_a_step_of_the_server_time() {
+    let clock = Arc::new(FakeClock::default());
+    let mut port = SimPort::new(
+        Arc::clone(&clock),
+        TimeDelta::ZERO,
+        Duration::from_micros(200),
+    );
+    port.step = |n| {
+        if n > 6 {
+            TimeDelta::from_millis(-300)
+        } else {
+            TimeDelta::ZERO
+        }
+    };
+    let mut service = service(port, Arc::clone(&clock));
+    let mut recorder = Recorder::default();
+    service.run(&mut recorder, Some(10));
+
+    // 7 回目（段差の後の 1 回目）は保留し、8 回目で段差とみなす。段差の検出は 1 回だけ
+    let steps: Vec<(usize, TimeDelta)> = recorder
+        .events
+        .iter()
+        .enumerate()
+        .filter_map(|(index, event)| {
+            if let SyncEvent::ClockStepDetected { step } = *event {
+                Some((index, step))
+            } else {
+                None
+            }
+        })
+        .collect();
+    assert_eq!(steps.len(), 1, "{:?}", recorder.events);
+    let (step_at, step) = steps[0];
+    assert_eq!(
+        recorder.events[step_at - 1],
+        recorder
+            .events
+            .iter()
+            .find(|event| matches!(event, SyncEvent::SampleAccepted { seq: 8, .. }))
+            .unwrap()
+            .clone(),
+        "8 回目の応答で段差とみなす"
+    );
+    assert_close_ms(step, -300.0);
+
+    let snapshot = service.snapshot();
+    let now = clock.now();
+    let projected = snapshot.anchor.unwrap().project(now.mono).unwrap();
+    assert_close_ms(projected.wrapping_since(now.wall), -300.0);
+    assert_close_ms(snapshot.selected_sample.unwrap().offset().delta(), -300.0);
 }

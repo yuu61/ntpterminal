@@ -6,20 +6,19 @@
 //! - 値は MIB の対応表（`application::acl::mib`）の OID に置き、TUI の表示を試せるよう衛星の数を時間とともに
 //!   少しずつ変える。S650 の衛星の一覧は、実機と同じく 128 バイトで切る（衛星が多いと内訳が出なくなる）
 
-use alloc::sync::Arc;
 use core::iter;
 use core::net::SocketAddr;
 use core::sync::atomic::{AtomicBool, Ordering};
-use core::time::Duration;
 use std::io;
 use std::net::UdpSocket;
-use std::thread::{self, JoinHandle};
 use std::time::Instant;
 
 use application::acl::mib::MibProfile;
 use application::acl::mib::meinberg::{self, lt, ltng, os};
 use application::acl::mib::microchip::{self, s650};
 use domain::snmp::{ObjectId, Pdu, PduKind, SnmpMessage, SnmpValue, VarBind, decode, encode};
+
+use super::ServeThread;
 
 /// 受け付けるコミュニティ名。
 pub const SIM_COMMUNITY: &[u8] = b"public";
@@ -35,9 +34,7 @@ const SYS_UP_TIME: [u32; 9] = [1, 3, 6, 1, 2, 1, 1, 3, 0];
 /// 疑似 SNMP エージェント。drop すると止まる。
 #[derive(Debug)]
 pub struct SimSnmpAgent {
-    local_addr: SocketAddr,
-    stop: Arc<AtomicBool>,
-    handle: Option<JoinHandle<()>>,
+    thread: ServeThread,
 }
 
 impl SimSnmpAgent {
@@ -47,36 +44,17 @@ impl SimSnmpAgent {
     ///
     /// ソケットを用意できない、またはスレッドを起動できないとき。
     pub fn spawn(bind: SocketAddr, profile: MibProfile) -> io::Result<Self> {
-        let socket = UdpSocket::bind(bind)?;
-        // 停止の合図を確認するため、定期的に受信待ちから戻る
-        socket.set_read_timeout(Some(Duration::from_millis(100)))?;
-        let local_addr = socket.local_addr()?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let handle = thread::Builder::new()
-            .name("sim-snmp-agent".into())
-            .spawn({
-                let thread_stop = Arc::clone(&stop);
-                move || serve(&socket, profile, &thread_stop)
-            })?;
-        Ok(Self {
-            local_addr,
-            stop,
-            handle: Some(handle),
-        })
+        let thread = ServeThread::spawn(
+            "sim-snmp-agent",
+            UdpSocket::bind(bind)?,
+            move |socket, stop| serve(socket, profile, stop),
+        )?;
+        Ok(Self { thread })
     }
 
     #[must_use]
     pub const fn local_addr(&self) -> SocketAddr {
-        self.local_addr
-    }
-}
-
-impl Drop for SimSnmpAgent {
-    fn drop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
-        if let Some(handle) = self.handle.take() {
-            drop(handle.join());
-        }
+        self.thread.local_addr
     }
 }
 
@@ -84,7 +62,8 @@ fn serve(socket: &UdpSocket, profile: MibProfile, stop: &AtomicBool) {
     let started = Instant::now();
     let mut buf = [0u8; 2048];
     while !stop.load(Ordering::Relaxed) {
-        // タイムアウトや、相手が消えたあとの ConnectionReset（Windows）は無視して続ける
+        // 相手が消えたあとの ConnectionReset（Windows）は無視して続ける。止めるときの空のデータグラムは
+        // 解析できないので読み捨て、ループの先頭で停止の合図を見る
         let Ok((len, peer)) = socket.recv_from(&mut buf) else {
             continue;
         };
