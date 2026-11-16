@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# 同じブランチに新しい push が来たら、古い実行は止める
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # 新しい clippy の lint で突然落ちないよう固定する。上げるときはここだけを変える
+  RUST_TOOLCHAIN: "1.100.0"
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: rustfmt
+      - run: cargo fmt --all --check
+
+  clippy-test:
+    name: clippy / doc / test (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        # Linux 専用のコード（raw_ip / link / kernel_ts）は ubuntu でしか検査されない
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # rustdoc の lint（Cargo.toml の [workspace.lints.rustdoc]）
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # raw ソケット / AF_PACKET を使う #[ignore] のテストは scripts/privileged_tests.sh で別に確かめる
+      - run: cargo test --workspace --locked
+
+  shellcheck:
+    name: shellcheck
+    # enable=all なので、ランナーの更新で shellcheck の版が変わって突然落ちないよう固定する
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      # ubuntu のランナーには shellcheck が入っている。設定（enable=all）は .shellcheckrc
+      - run: shellcheck scripts/*.sh

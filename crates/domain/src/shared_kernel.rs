@@ -3,7 +3,7 @@
 //! このアプリには 3 種類の時刻がある。混ぜてはいけない。
 //! 1. サーバ時刻 … [`NtpTimestamp`]（T2, T3）
 //! 2. PC のモノトニック時計 … [`PcTime`]（[`Timebase::Monotonic`]）。delay と基準点に使う
-//! 3. PC の壁時計 … [`LocalStamp::wall`]（NtpTimestamp 形式）。offset の計算にだけ使う
+//! 3. PC の壁時計 … [`LocalStamp::wall`]（`NtpTimestamp` 形式）。offset の計算にだけ使う
 
 mod local_time;
 mod ntp_timestamp;

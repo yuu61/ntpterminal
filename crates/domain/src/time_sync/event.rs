@@ -1,4 +1,4 @@
-use std::fmt;
+use alloc::fmt;
 
 use super::{KissCode, Sample, SampleError, ServerInfo, SyncState};
 use crate::shared_kernel::TimeDelta;
@@ -23,6 +23,7 @@ pub enum RejectReason {
 
 impl RejectReason {
     /// 自分の問い合わせとは関係のない受信か（問い合わせの成否には数えない）。
+    #[must_use]
     pub const fn is_stray(self) -> bool {
         matches!(
             self,
@@ -33,7 +34,7 @@ impl RejectReason {
 
 impl fmt::Display for RejectReason {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::NoPendingExchange => f.write_str("応答待ちの問い合わせがないときに受信しました"),
             Self::OriginMismatch => f.write_str(
                 "応答待ちの問い合わせと一致しません（遅れて届いた応答か、無関係なパケット）",

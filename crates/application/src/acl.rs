@@ -7,7 +7,8 @@
 use domain::packet_crafting::NtpMessage;
 use domain::time_sync::ServerReply;
 
-pub fn to_server_reply(message: &NtpMessage) -> ServerReply {
+#[must_use]
+pub const fn to_server_reply(message: &NtpMessage) -> ServerReply {
     ServerReply {
         leap: message.leap,
         version: message.version,

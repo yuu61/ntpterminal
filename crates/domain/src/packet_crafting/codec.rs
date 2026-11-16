@@ -15,10 +15,13 @@ pub enum DecodeError {
 }
 
 /// NTP メッセージをバイト列にする。LI / VN / Mode は各ビット幅に切り詰める。
+#[must_use]
 pub fn encode(message: &NtpMessage) -> Vec<u8> {
     let mut buf = Vec::with_capacity(HEADER_LEN + message.trailing.len());
     buf.push(
-        ((message.leap & 0b11) << 6) | ((message.version & 0b111) << 3) | (message.mode & 0b111),
+        ((message.leap & 0b11) << 6i32)
+            | ((message.version & 0b111) << 3i32)
+            | (message.mode & 0b111),
     );
     buf.push(message.stratum);
     buf.extend_from_slice(&message.poll.to_be_bytes());
@@ -39,8 +42,12 @@ pub fn encode(message: &NtpMessage) -> Vec<u8> {
 }
 
 /// バイト列を NTP メッセージとして読む。48 バイト未満でなければ必ず成功する。
+///
+/// # Errors
+///
+/// 48 バイト未満のとき。
 pub fn decode(bytes: &[u8]) -> Result<NtpMessage, DecodeError> {
-    let Some(header) = bytes.get(..HEADER_LEN) else {
+    let Some(header) = bytes.first_chunk::<HEADER_LEN>() else {
         return Err(DecodeError::TooShort { len: bytes.len() });
     };
     Ok(NtpMessage {
@@ -62,11 +69,17 @@ pub fn decode(bytes: &[u8]) -> Result<NtpMessage, DecodeError> {
 }
 
 fn be_u32(bytes: &[u8]) -> u32 {
-    bytes.iter().fold(0, |acc, &b| (acc << 8) | u32::from(b))
+    bytes
+        .iter()
+        .fold(0, |acc, &byte| (acc << 8i32) | u32::from(byte))
 }
 
 fn timestamp(bytes: &[u8]) -> NtpTimestamp {
-    NtpTimestamp::from_bits(bytes.iter().fold(0, |acc, &b| (acc << 8) | u64::from(b)))
+    NtpTimestamp::from_bits(
+        bytes
+            .iter()
+            .fold(0, |acc, &byte| (acc << 8i32) | u64::from(byte)),
+    )
 }
 
 #[cfg(test)]
@@ -119,7 +132,7 @@ mod tests {
             message.transmit_timestamp,
             NtpTimestamp::from_parts(0xEC00_0001, 0x8000_1000)
         );
-        assert!(message.trailing.is_empty());
+        assert_eq!(message.trailing, Vec::<u8>::new());
     }
 
     #[test]
@@ -157,6 +170,6 @@ mod tests {
     #[test]
     fn rejects_short_packets_only() {
         assert_eq!(decode(&[0u8; 47]), Err(DecodeError::TooShort { len: 47 }));
-        assert!(decode(&[0u8; 48]).is_ok());
+        drop(decode(&[0u8; 48]).unwrap());
     }
 }

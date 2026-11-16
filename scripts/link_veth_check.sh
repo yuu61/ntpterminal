@@ -12,7 +12,7 @@
 set -eu
 BIN=${1:?"ntpterminal のパスを指定してください"}
 
-exec unshare -rn sh -s "$BIN" <<'INNER'
+exec unshare -rn sh -s "${BIN}" <<'INNER'
 set -eu
 BIN=$1
 fail() { echo "NG: $*"; exit 1; }

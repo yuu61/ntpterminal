@@ -1,15 +1,18 @@
 //! 組み立て役（composition root）。各層の部品をつなぐだけで、ロジックは持たない。
+#![forbid(unsafe_code)]
 
-use std::io;
-use std::net::SocketAddr;
+extern crate alloc;
+
+use alloc::sync::Arc;
+use core::net::SocketAddr;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
+use std::io::{self, Write as _};
 use std::process::ExitCode;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread;
-use std::time::Duration;
 
-use anyhow::{Context, bail};
+use anyhow::{Context as _, bail};
 use application::polling_policy;
 use application::port::ClockPort;
 use application::timestamping::TimestampingStatus;
@@ -79,9 +82,9 @@ struct ZoneArgs {
 enum ModeArg {
     /// 標準の UDP ソケット（権限不要・全 OS）
     Udp,
-    /// IPv4 / UDP ヘッダを自作して raw ソケットで送る（Linux のみ・root か CAP_NET_RAW が必要）
+    /// IPv4 / UDP ヘッダを自作して raw ソケットで送る（Linux のみ・root か `CAP_NET_RAW` が必要）
     RawIp,
-    /// Ethernet フレームから自作して AF_PACKET で送る（Linux のみ・root か CAP_NET_RAW が必要）
+    /// Ethernet フレームから自作して `AF_PACKET` で送る（Linux のみ・root か `CAP_NET_RAW` が必要）
     Link,
 }
 
@@ -139,7 +142,7 @@ struct TransportArgs {
 }
 
 impl TransportArgs {
-    fn mode(&self) -> TransportMode {
+    const fn mode(&self) -> TransportMode {
         match self.mode {
             ModeArg::Udp => TransportMode::Udp,
             ModeArg::RawIp => TransportMode::RawIp,
@@ -203,7 +206,7 @@ impl TransportArgs {
 fn parse_hex_u16(text: &str) -> Result<u16, String> {
     text.strip_prefix("0x")
         .and_then(|hex| u16::from_str_radix(hex, 16).ok())
-        .ok_or_else(|| "0x1234 の形式で指定してください".to_string())
+        .ok_or_else(|| "0x1234 の形式で指定してください".to_owned())
 }
 
 fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
@@ -214,7 +217,7 @@ fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
             .strip_prefix("0x")
             .and_then(|hex| u16::from_str_radix(hex, 16).ok())
             .map(UdpChecksum::Fixed)
-            .ok_or_else(|| "compute / zero / 0x1234 の形式で指定してください".to_string()),
+            .ok_or_else(|| "compute / zero / 0x1234 の形式で指定してください".to_owned()),
     }
 }
 
@@ -297,7 +300,8 @@ fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
         Err(error) => {
-            eprintln!("エラー: {error:#}");
+            // 標準エラーにも書けないときは、終了コードだけで知らせる
+            drop(writeln!(io::stderr().lock(), "エラー: {error:#}"));
             ExitCode::FAILURE
         }
     }
@@ -343,23 +347,23 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     let sync_thread = thread::Builder::new()
         .name("ntp-sync".into())
         .spawn({
-            let stop = Arc::clone(&stop);
-            move || service.run_until(&mut SnapshotSender::new(tx), None, &stop)
+            let thread_stop = Arc::clone(&stop);
+            move || service.run_until(&mut SnapshotSender::new(tx), None, &thread_stop)
         })
         .context("同期スレッドを起動できません")?;
 
     let config = TuiConfig {
         title: args.title.clone(),
-        server_label: args.server.trim().to_string(),
+        server_label: args.server.trim().to_owned(),
         footer: args.footer.clone(),
         zone,
         transport: transport_label,
         timestamping,
     };
-    let result = tui::run(&config, clock, rx);
+    let result = tui::run(&config, clock.as_ref(), &rx);
 
     stop.store(true, Ordering::Relaxed);
-    let _ = sync_thread.join();
+    drop(sync_thread.join());
     result.context("端末の表示でエラーが起きました")?;
     Ok(ExitCode::SUCCESS)
 }
@@ -385,7 +389,8 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     );
     match result {
         Ok(outcome) if args.target.json => {
-            println!(
+            writeln!(
+                io::stdout().lock(),
                 "{}",
                 once::render_json(
                     server,
@@ -393,11 +398,12 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
                     timestamping_label(&timestamping.counts()),
                     &outcome,
                 )
-            );
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Ok(outcome) => {
-            print!(
+            write!(
+                io::stdout().lock(),
                 "{}",
                 once::render_text(
                     server,
@@ -406,15 +412,19 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
                     &outcome,
                     &zone,
                 )
-            );
+            )?;
             Ok(ExitCode::SUCCESS)
         }
         Err(error) if args.target.json => {
-            println!("{}", once::render_error_json(server, &error));
+            writeln!(
+                io::stdout().lock(),
+                "{}",
+                once::render_error_json(server, &error)
+            )?;
             Ok(ExitCode::FAILURE)
         }
         Err(error) => {
-            eprintln!("{server}: {error}");
+            writeln!(io::stderr().lock(), "{server}: {error}")?;
             Ok(ExitCode::FAILURE)
         }
     }
@@ -461,13 +471,14 @@ fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
     };
     let server = SimServer::spawn(args.bind, config)
         .with_context(|| format!("{} で待ち受けできません", args.bind))?;
-    eprintln!(
+    writeln!(
+        io::stderr().lock(),
         "疑似 NTP サーバを {} で起動しました（offset {:+.3} ms, stratum {}, refid {}）。Ctrl+C で終了します。",
         server.local_addr(),
         args.offset_ms,
         args.stratum,
         args.refid
-    );
+    )?;
     server.join();
     Ok(ExitCode::SUCCESS)
 }

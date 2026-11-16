@@ -4,13 +4,19 @@
 //! `sh scripts/privileged_tests.sh` がネットワーク名前空間の中で実行する（root 不要）。
 #![cfg(target_os = "linux")]
 
-use std::io::Read;
-use std::net::{SocketAddr, SocketAddrV4};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+extern crate alloc;
+
+use alloc::sync::Arc;
+use core::net::{SocketAddr, SocketAddrV4};
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
+use std::io::Read as _;
+use std::net::UdpSocket;
+use std::thread;
+use std::time::Instant;
 
 use application::port::ClockPort;
-use application::usecase::query_once;
+use application::usecase::{OnceOutcome, query_once};
 use domain::packet_crafting::{
     HeaderTemplate, Ipv4Spec, NtpMessage, RequestTemplate, UdpChecksum, decode, decode_ipv4_udp,
     udp_checksum,
@@ -37,7 +43,7 @@ struct Captured {
 /// `capture` で受け取った UDP のうち、条件に合う最初のものを返す。
 fn find_packet(capture: &Socket, wanted: impl Fn(&Captured) -> bool) -> Option<Captured> {
     let deadline = Instant::now() + Duration::from_secs(2);
-    let mut buf = vec![0u8; 65_535];
+    let mut buf = vec![0u8; 0xFFFF];
     while Instant::now() < deadline {
         let Ok(len) = (&*capture).read(&mut buf) else {
             continue;
@@ -110,13 +116,13 @@ fn query_over_raw_ip_sends_crafted_headers() {
     .unwrap();
     let offset_ms = outcome.sample.offset().delta().as_millis_f64();
     assert!(
-        (offset_ms - 5.0).abs() < 2.0,
+        (offset_ms - 5.0).abs() < 2.0f64,
         "offset = {offset_ms} ms（+5ms のはず）"
     );
 
     // 2. 実際に送られたパケットのヘッダが指定どおり
-    let request = find_packet(&capture, |p| {
-        p.source == local && p.destination == server_addr
+    let request = find_packet(&capture, |packet| {
+        packet.source == local && packet.destination == server_addr
     })
     .expect("送信した要求が見つからない");
     assert_eq!(request.ttl, 7);
@@ -144,15 +150,15 @@ fn ignores_unrelated_udp_traffic_while_waiting() {
         SimServer::spawn("127.0.0.1:0".parse().unwrap(), SimServerConfig::default()).unwrap();
 
     // 問い合わせ中、ほかのポートあての UDP を大量に流し続ける
-    let noise = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
-    let sink = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let noise = UdpSocket::bind("127.0.0.1:0").unwrap();
+    let sink = UdpSocket::bind("127.0.0.1:0").unwrap();
     let sink_addr = sink.local_addr().unwrap();
-    let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let noise_thread = std::thread::spawn({
-        let stop = Arc::clone(&stop);
+    let stop = Arc::new(AtomicBool::new(false));
+    let noise_thread = thread::spawn({
+        let thread_stop = Arc::clone(&stop);
         move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = noise.send_to(&[0u8; 64], sink_addr);
+            while !thread_stop.load(Ordering::Relaxed) {
+                drop(noise.send_to(&[0u8; 64], sink_addr));
             }
         }
     });
@@ -172,7 +178,7 @@ fn ignores_unrelated_udp_traffic_while_waiting() {
         RequestTemplate::default(),
         Duration::from_secs(2),
     );
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    stop.store(true, Ordering::Relaxed);
     noise_thread.join().unwrap();
     assert!(result.is_ok(), "{result:?}");
 }
@@ -199,7 +205,7 @@ fn raw_ip_uses_kernel_time_for_both_send_and_receive() {
     )
     .unwrap()
     .port;
-    query_once(
+    let _: OnceOutcome = query_once(
         port,
         RandomNonce::new(),
         clock,

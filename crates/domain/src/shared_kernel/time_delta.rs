@@ -1,7 +1,7 @@
-use std::ops::{Add, Div, Mul, Neg, Sub};
-use std::time::Duration;
+use core::ops::{Add, Div, Mul, Neg, Sub};
+use core::time::Duration;
 
-pub(crate) const NANOS_PER_SEC: i128 = 1_000_000_000;
+pub(super) const NANOS_PER_SEC: i128 = 1_000_000_000;
 
 /// 符号付きの時間差（ナノ秒単位）。offset のように負になりうる量を表す。
 ///
@@ -14,22 +14,26 @@ pub struct TimeDelta {
 impl TimeDelta {
     pub const ZERO: Self = Self { nanos: 0 };
 
+    #[must_use]
     pub const fn from_nanos(nanos: i64) -> Self {
         Self { nanos }
     }
 
+    #[must_use]
     pub const fn from_micros(micros: i64) -> Self {
         Self {
             nanos: micros.saturating_mul(1_000),
         }
     }
 
+    #[must_use]
     pub const fn from_millis(millis: i64) -> Self {
         Self {
             nanos: millis.saturating_mul(1_000_000),
         }
     }
 
+    #[must_use]
     pub const fn from_secs(secs: i64) -> Self {
         Self {
             nanos: secs.saturating_mul(1_000_000_000),
@@ -37,6 +41,11 @@ impl TimeDelta {
     }
 
     /// 小数ミリ秒から作る（設定値の読み込み用）。範囲外は飽和し、NaN は 0 になる。
+    #[must_use]
+    #[expect(
+        clippy::cast_possible_truncation,
+        reason = "f64 から整数への変換で、範囲外を飽和させ NaN を 0 にできるのは as だけ"
+    )]
     pub fn from_millis_f64(millis: f64) -> Self {
         Self {
             nanos: (millis * 1_000_000.0).round() as i64,
@@ -44,6 +53,7 @@ impl TimeDelta {
     }
 
     /// std の [`Duration`] から作る。範囲外は飽和する。
+    #[must_use]
     pub fn from_std(duration: Duration) -> Self {
         Self {
             nanos: i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX),
@@ -61,30 +71,36 @@ impl TimeDelta {
     }
 
     pub(crate) fn from_i128_nanos(nanos: i128) -> Self {
-        let nanos = i64::try_from(nanos).unwrap_or(if nanos < 0 { i64::MIN } else { i64::MAX });
-        Self { nanos }
+        let clamped = i64::try_from(nanos).unwrap_or(if nanos < 0 { i64::MIN } else { i64::MAX });
+        Self { nanos: clamped }
     }
 
+    #[must_use]
     pub const fn as_nanos(self) -> i64 {
         self.nanos
     }
 
+    #[must_use]
     pub fn as_secs_f64(self) -> f64 {
         self.nanos as f64 / 1e9
     }
 
+    #[must_use]
     pub fn as_millis_f64(self) -> f64 {
         self.nanos as f64 / 1e6
     }
 
+    #[must_use]
     pub fn as_micros_f64(self) -> f64 {
         self.nanos as f64 / 1e3
     }
 
+    #[must_use]
     pub const fn is_negative(self) -> bool {
         self.nanos < 0
     }
 
+    #[must_use]
     pub const fn abs(self) -> Self {
         Self {
             nanos: self.nanos.saturating_abs(),
@@ -92,6 +108,7 @@ impl TimeDelta {
     }
 
     /// std の [`Duration`] に変換する。負の値は 0 になる。
+    #[must_use]
     pub fn to_std_saturating(self) -> Duration {
         Duration::from_nanos(u64::try_from(self.nanos).unwrap_or(0))
     }

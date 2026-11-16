@@ -1,27 +1,26 @@
-//! 送信に使うインターフェースの情報と、AF_PACKET のアドレス（sockaddr_ll）。Linux のみ。
+//! 送信に使うインターフェースの情報と、`AF_PACKET` のアドレス（`sockaddr_ll`）。Linux のみ。
 
+use core::net::Ipv4Addr;
 use std::io;
-use std::mem::size_of;
-use std::net::Ipv4Addr;
 
 use domain::packet_crafting::MacAddr;
 use nix::ifaddrs::getifaddrs;
 use nix::libc;
 use nix::net::if_::if_nametoindex;
-use nix::sys::socket::{LinkAddr, SockaddrLike};
+use nix::sys::socket::{LinkAddr, SockaddrLike as _};
 
 const ARPHRD_ETHER: u16 = 1;
 const ARPHRD_LOOPBACK: u16 = 772;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum LinkKind {
+pub(super) enum LinkKind {
     Ethernet,
     /// ループバック（lo）。MAC はすべて 0 で、ARP は要らない
     Loopback,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Interface {
+pub(super) struct Interface {
     pub name: String,
     pub index: u32,
     pub mac: MacAddr,
@@ -29,7 +28,7 @@ pub(crate) struct Interface {
 }
 
 /// IPv4 アドレス `local_ip` を持つインターフェースを探す。
-pub(crate) fn find_interface(local_ip: Ipv4Addr) -> io::Result<Interface> {
+pub(super) fn find_interface(local_ip: Ipv4Addr) -> io::Result<Interface> {
     let addresses: Vec<_> = getifaddrs()?.collect();
     let name = addresses
         .iter()
@@ -77,14 +76,23 @@ pub(crate) fn find_interface(local_ip: Ipv4Addr) -> io::Result<Interface> {
     })
 }
 
-/// AF_PACKET の bind 先・送信先のアドレス（sockaddr_ll）を作る。
+/// `AF_PACKET` の bind 先・送信先のアドレス（`sockaddr_ll`）を作る。
 ///
 /// `protocol` は EtherType（ホストのバイト順で渡す。中でネットワークバイト順にする）。
-pub(crate) fn link_addr(index: u32, protocol: u16, destination: MacAddr) -> io::Result<LinkAddr> {
+#[expect(
+    clippy::map_err_ignore,
+    reason = "起こりえない整数変換の失敗（英語のエラー）を、何が起きたかを示す日本語の文言に置き換える"
+)]
+#[expect(
+    unsafe_code,
+    reason = "AF_PACKET のアドレス（sockaddr_ll）は nix に安全な作り方がなく、生の構造体から作る"
+)]
+pub(super) fn link_addr(index: u32, protocol: u16, destination: MacAddr) -> io::Result<LinkAddr> {
     let mut address = [0u8; 8];
     address[..6].copy_from_slice(&destination.0);
     let raw = libc::sockaddr_ll {
-        sll_family: libc::AF_PACKET as u16,
+        sll_family: u16::try_from(libc::AF_PACKET)
+            .map_err(|_| io::Error::other("AF_PACKET の値が u16 に収まりません"))?,
         sll_protocol: protocol.to_be(),
         sll_ifindex: i32::try_from(index)
             .map_err(|_| io::Error::other("インターフェース番号が大きすぎます"))?,
@@ -97,7 +105,7 @@ pub(crate) fn link_addr(index: u32, protocol: u16, destination: MacAddr) -> io::
         .map_err(|_| io::Error::other("sockaddr_ll の大きさが不正です"))?;
     // SAFETY: `raw` はすべての項目を初期化した sockaddr_ll で、この関数が終わるまで有効。
     // 渡す長さはちょうど sockaddr_ll の大きさなので、from_raw は範囲内だけを読む。
-    unsafe { LinkAddr::from_raw((&raw as *const libc::sockaddr_ll).cast(), Some(len)) }
+    unsafe { LinkAddr::from_raw((&raw const raw).cast(), Some(len)) }
         .ok_or_else(|| io::Error::other("AF_PACKET のアドレスを作れません"))
 }
 

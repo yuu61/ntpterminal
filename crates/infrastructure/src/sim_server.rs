@@ -1,11 +1,13 @@
 //! 開発・テスト用の疑似 NTP サーバ。
 
+use alloc::sync::Arc;
+use core::net::SocketAddr;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
 use std::io;
-use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::net::UdpSocket;
 use std::thread::{self, JoinHandle};
-use std::time::{Duration, SystemTime};
+use std::time::SystemTime;
 
 use domain::packet_crafting::{NtpMessage, decode, encode};
 use domain::shared_kernel::{NtpTimestamp, TimeDelta};
@@ -33,6 +35,7 @@ impl Default for SimServerConfig {
 /// 疑似 NTP サーバ。クライアント要求（mode 3）に「PC の壁時計 + offset」で応答する。
 ///
 /// 実機のタイムサーバがなくても、計測や TUI の表示を試せる。drop すると止まる。
+#[derive(Debug)]
 pub struct SimServer {
     local_addr: SocketAddr,
     stop: Arc<AtomicBool>,
@@ -40,6 +43,11 @@ pub struct SimServer {
 }
 
 impl SimServer {
+    /// 疑似サーバを `bind` で起動し、別スレッドで応答させる。
+    ///
+    /// # Errors
+    ///
+    /// ソケットを用意できない、またはスレッドを起動できないとき。
     pub fn spawn(bind: SocketAddr, config: SimServerConfig) -> io::Result<Self> {
         let socket = UdpSocket::bind(bind)?;
         // 停止の合図を確認するため、定期的に受信待ちから戻る
@@ -49,8 +57,8 @@ impl SimServer {
         let handle = thread::Builder::new()
             .name("sim-ntp-server".into())
             .spawn({
-                let stop = Arc::clone(&stop);
-                move || serve(&socket, config, &stop)
+                let thread_stop = Arc::clone(&stop);
+                move || serve(&socket, config, &thread_stop)
             })?;
         Ok(Self {
             local_addr,
@@ -59,14 +67,15 @@ impl SimServer {
         })
     }
 
-    pub fn local_addr(&self) -> SocketAddr {
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddr {
         self.local_addr
     }
 
     /// サーバのスレッドが終わるまで待つ（CLI で動かし続ける用）。
     pub fn join(mut self) {
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            drop(handle.join());
         }
     }
 }
@@ -75,7 +84,7 @@ impl Drop for SimServer {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(handle) = self.handle.take() {
-            let _ = handle.join();
+            drop(handle.join());
         }
     }
 }
@@ -110,7 +119,7 @@ fn serve(socket: &UdpSocket, config: SimServerConfig, stop: &AtomicBool) {
             transmit_timestamp: server_now(config.offset),
             trailing: Vec::new(),
         };
-        let _ = socket.send_to(&encode(&reply), peer);
+        drop(socket.send_to(&encode(&reply), peer));
     }
 }
 

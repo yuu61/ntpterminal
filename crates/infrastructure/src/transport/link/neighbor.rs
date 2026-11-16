@@ -3,7 +3,7 @@
 //! 文字列を受け取る純粋な関数にして、実機なしでテストできるようにしている。
 //! ポリシールーティング（ip rule）には対応しない。合わないときは `--dst-mac` で宛先 MAC を直接指定する。
 
-use std::net::Ipv4Addr;
+use core::net::Ipv4Addr;
 
 use domain::packet_crafting::MacAddr;
 
@@ -13,7 +13,7 @@ const RTF_GATEWAY: u16 = 0x0002;
 const ATF_COM: u32 = 0x02;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Route {
+pub(super) struct Route {
     pub interface: String,
     pub destination: Ipv4Addr,
     pub gateway: Ipv4Addr,
@@ -26,13 +26,13 @@ pub(crate) struct Route {
 ///
 /// アドレスはネットワークバイト順の値を「その CPU の整数として」16 進で出力したもの。
 /// 例: リトルエンディアンでは 192.168.2.1 が `0102A8C0` になる。
-pub(crate) fn parse_routes(text: &str) -> Vec<Route> {
+pub(super) fn parse_routes(text: &str) -> Vec<Route> {
     text.lines()
         .skip(1)
         .filter_map(|line| {
             let fields: Vec<&str> = line.split_whitespace().collect();
             Some(Route {
-                interface: (*fields.first()?).to_string(),
+                interface: (*fields.first()?).to_owned(),
                 destination: hex_address(fields.get(1)?)?,
                 gateway: hex_address(fields.get(2)?)?,
                 flags: u16::from_str_radix(fields.get(3)?, 16).ok()?,
@@ -50,17 +50,17 @@ fn hex_address(text: &str) -> Option<Ipv4Addr> {
 
 /// `interface` から `target` へ送るときの次の転送先（同じネットワークなら `target` 自身、
 /// それ以外はゲートウェイ）。カーネルと同じく、最長一致・次にメトリックが小さい経路を選ぶ。
-pub(crate) fn next_hop(routes: &[Route], interface: &str, target: Ipv4Addr) -> Option<Ipv4Addr> {
+pub(super) fn next_hop(routes: &[Route], interface: &str, target: Ipv4Addr) -> Option<Ipv4Addr> {
     let target_bits = u32::from(target);
     routes
         .iter()
         .filter(|route| route.interface == interface && route.flags & RTF_UP != 0)
         .filter(|route| target_bits & u32::from(route.mask) == u32::from(route.destination))
-        .max_by(|a, b| {
+        .max_by(|left, right| {
             let prefix = |route: &Route| u32::from(route.mask).count_ones();
-            prefix(a)
-                .cmp(&prefix(b))
-                .then_with(|| b.metric.cmp(&a.metric))
+            prefix(left)
+                .cmp(&prefix(right))
+                .then_with(|| right.metric.cmp(&left.metric))
         })
         .map(|route| {
             if route.flags & RTF_GATEWAY != 0 {
@@ -72,7 +72,7 @@ pub(crate) fn next_hop(routes: &[Route], interface: &str, target: Ipv4Addr) -> O
 }
 
 /// /proc/net/arp から、`interface` 上の `ip` の MAC アドレスを探す。完成していないエントリは使わない。
-pub(crate) fn find_neighbor(text: &str, interface: &str, ip: Ipv4Addr) -> Option<MacAddr> {
+pub(super) fn find_neighbor(text: &str, interface: &str, ip: Ipv4Addr) -> Option<MacAddr> {
     text.lines().skip(1).find_map(|line| {
         let fields: Vec<&str> = line.split_whitespace().collect();
         let entry_ip: Ipv4Addr = fields.first()?.parse().ok()?;

@@ -1,0 +1,2 @@
+# shellcheck の設定（scripts/*.sh）。既定で無効の検査も含めて、すべて有効にする。
+enable=all

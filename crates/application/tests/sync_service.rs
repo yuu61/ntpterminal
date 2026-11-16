@@ -1,12 +1,14 @@
-//! SyncService / query_once の結合テスト。
+//! `SyncService` / `query_once` の結合テスト。
 //!
 //! 偽の時計（仮想時間）と、遅延・offset・パケットロスを設定できる模擬ネットワークを使う。
 //! 実際の時間は待たない。
 
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::time::Duration;
+extern crate alloc;
+
+use alloc::collections::VecDeque;
+use alloc::sync::Arc;
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::time::Duration;
 
 use application::port::{ClockPort, EventSink, Inbound, NonceSource, PacketPort, TransportError};
 use application::snapshot::SyncSnapshot;
@@ -25,12 +27,14 @@ struct FakeClock {
 
 impl FakeClock {
     fn advance(&self, duration: Duration) {
-        self.mono_nanos
-            .fetch_add(duration.as_nanos() as u64, Ordering::SeqCst);
+        let _previous = self.mono_nanos.fetch_add(
+            u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
+            Ordering::SeqCst,
+        );
     }
 
     fn advance_to(&self, nanos: u64) {
-        self.mono_nanos.fetch_max(nanos, Ordering::SeqCst);
+        let _previous = self.mono_nanos.fetch_max(nanos, Ordering::SeqCst);
     }
 }
 
@@ -39,7 +43,7 @@ impl ClockPort for FakeClock {
         let nanos = self.mono_nanos.load(Ordering::SeqCst);
         LocalStamp {
             mono: PcTime::monotonic(nanos),
-            wall: WALL_BASE.wrapping_add(TimeDelta::from_nanos(nanos as i64)),
+            wall: WALL_BASE.wrapping_add(TimeDelta::from_nanos(nanos.cast_signed())),
         }
     }
 }
@@ -75,7 +79,7 @@ impl PacketPort for SimPort {
         if (self.drop_request)(self.sent) {
             return Ok(sent);
         }
-        let request = decode(payload).expect("要求を解析できない");
+        let request = decode(payload).map_err(|error| TransportError::Io(error.to_string()))?;
         let server_time = sent
             .wall
             .wrapping_add(TimeDelta::from_std(self.one_way) + self.server_offset);
@@ -89,19 +93,22 @@ impl PacketPort for SimPort {
             transmit_timestamp: server_time,
             ..NtpMessage::default()
         };
-        let arrival = sent.mono.nanos() + 2 * self.one_way.as_nanos() as u64;
+        let one_way = u64::try_from(self.one_way.as_nanos()).unwrap_or(u64::MAX);
+        let arrival = sent.mono.nanos() + 2 * one_way;
         self.in_flight.push_back((arrival, encode(&reply)));
         Ok(sent)
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError> {
         let now = self.clock.now().mono.nanos();
-        let deadline = now + timeout.as_nanos() as u64;
-        if let Some(&(arrival, _)) = self.in_flight.front()
-            && arrival <= deadline
+        let deadline = now + u64::try_from(timeout.as_nanos()).unwrap_or(u64::MAX);
+        if self
+            .in_flight
+            .front()
+            .is_some_and(|&(arrival, _)| arrival <= deadline)
+            && let Some((arrived_at, payload)) = self.in_flight.pop_front()
         {
-            let (arrival, payload) = self.in_flight.pop_front().unwrap();
-            self.clock.advance_to(arrival);
+            self.clock.advance_to(arrived_at);
             return Ok(Some(Inbound {
                 payload,
                 received: self.clock.now(),
@@ -147,7 +154,7 @@ fn service(port: SimPort, clock: Arc<FakeClock>) -> SyncService<SimPort, SeqNonc
 fn assert_close_ms(actual: TimeDelta, expected_ms: f64) {
     let diff = (actual.as_millis_f64() - expected_ms).abs();
     assert!(
-        diff < 1e-5,
+        diff < 1e-5f64,
         "actual {} ms, expected {expected_ms} ms",
         actual.as_millis_f64()
     );
@@ -161,7 +168,7 @@ fn polls_at_interval_and_measures_offset() {
         TimeDelta::from_millis(5),
         Duration::from_micros(200),
     );
-    let mut service = service(port, clock.clone());
+    let mut service = service(port, Arc::clone(&clock));
     let mut recorder = Recorder::default();
     service.run(&mut recorder, Some(5));
 
@@ -262,7 +269,7 @@ fn query_once_times_out() {
     let result = query_once(
         port,
         SeqNonce::default(),
-        clock.clone(),
+        Arc::<FakeClock>::clone(&clock),
         RequestTemplate::default(),
         Duration::from_millis(300),
     );

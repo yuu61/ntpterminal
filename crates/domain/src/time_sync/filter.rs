@@ -1,4 +1,4 @@
-use std::collections::VecDeque;
+use alloc::collections::VecDeque;
 
 use super::Sample;
 
@@ -13,22 +13,24 @@ pub struct ClockFilter {
 
 impl ClockFilter {
     /// `capacity` 件まで保持する（最低 1 件）。
+    #[must_use]
     pub fn new(capacity: usize) -> Self {
-        let capacity = capacity.max(1);
+        let size = capacity.max(1);
         Self {
-            capacity,
-            samples: VecDeque::with_capacity(capacity),
+            capacity: size,
+            samples: VecDeque::with_capacity(size),
         }
     }
 
     pub fn push(&mut self, sample: Sample) {
         if self.samples.len() == self.capacity {
-            self.samples.pop_front();
+            let _: Option<Sample> = self.samples.pop_front();
         }
         self.samples.push_back(sample);
     }
 
     /// 往復遅延が最小の標本。同じ遅延なら新しいほうを選ぶ。
+    #[must_use]
     pub fn best(&self) -> Option<&Sample> {
         self.samples
             .iter()
@@ -36,10 +38,12 @@ impl ClockFilter {
             .min_by_key(|sample| sample.delay())
     }
 
+    #[must_use]
     pub fn len(&self) -> usize {
         self.samples.len()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.samples.is_empty()
     }

@@ -6,10 +6,18 @@ NTP サーバに 1 秒未満の間隔で問い合わせ、サーバ時刻を大�
 
 ```sh
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
-cargo fmt --all
+cargo clippy --workspace --all-targets -- -D warnings   # 設定: Cargo.toml の [workspace.lints]、clippy.toml
+cargo doc --workspace --no-deps                         # rustdoc の lint（CI は -D warnings）
+cargo fmt --all                                         # 設定: rustfmt.toml
+shellcheck scripts/*.sh                                 # WSL / CI（Windows には入っていない）。設定: .shellcheckrc
 sh scripts/privileged_tests.sh   # Linux のみ: raw ソケット / AF_PACKET を使う確認（root 不要）
 ```
+
+lint は clippy（restriction を含む全グループ）・rustc・rustdoc・shellcheck のすべてを有効にしている。
+警告はコードを直して消す。外してよいのは Cargo.toml に書いた基準 [1]〜[4] に当てはまる lint だけで、
+コードの中で外すのはやむを得ない場合だけ `#[expect(lint, reason = "…")]` を使う（`#[allow]` はエラーになる）。
+clippy.toml はルートと `crates/domain/` の 2 つ（マージされないので、共通の設定は両方に書く）。
+`cfg(target_os = "linux")` のコードは Windows の clippy では検査されない。WSL か CI（ubuntu と windows）で確かめる。
 
 実機のサーバがなくても `cargo run -- sim-server` と `cargo run -- tui 127.0.0.1:12300` で動かせる。
 手順の詳細は `docs/testing.md`。

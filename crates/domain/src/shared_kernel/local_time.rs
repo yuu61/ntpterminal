@@ -11,7 +11,7 @@ use super::{NtpTimestamp, TimeDelta};
 pub enum Timebase {
     /// ユーザ空間で読んだプロセス内のモノトニック時計。
     Monotonic,
-    /// カーネルが付けた CLOCK_REALTIME のタイムスタンプ（予約）。
+    /// カーネルが付けた `CLOCK_REALTIME` のタイムスタンプ（予約）。
     KernelRealtime,
     /// Windows のソフトウェアタイムスタンプ（QPC。予約）。
     WindowsQpc,
@@ -34,23 +34,31 @@ pub struct PcTime {
 }
 
 impl PcTime {
+    #[must_use]
     pub const fn new(timebase: Timebase, nanos: u64) -> Self {
         Self { timebase, nanos }
     }
 
+    #[must_use]
     pub const fn monotonic(nanos: u64) -> Self {
         Self::new(Timebase::Monotonic, nanos)
     }
 
+    #[must_use]
     pub const fn timebase(self) -> Timebase {
         self.timebase
     }
 
+    #[must_use]
     pub const fn nanos(self) -> u64 {
         self.nanos
     }
 
-    /// 時刻基準が違えばエラー。
+    /// `earlier` からの経過時間。
+    ///
+    /// # Errors
+    ///
+    /// 時刻基準が違うとき。
     pub fn since(self, earlier: Self) -> Result<TimeDelta, TimebaseMismatch> {
         self.ensure_same(earlier)?;
         Ok(TimeDelta::from_i128_nanos(
@@ -59,6 +67,7 @@ impl PcTime {
     }
 
     /// 0 未満にはならない。
+    #[must_use]
     pub fn saturating_add(self, delta: TimeDelta) -> Self {
         let nanos = i128::from(self.nanos) + i128::from(delta.as_nanos());
         Self {
@@ -67,7 +76,11 @@ impl PcTime {
         }
     }
 
-    /// 時刻基準が違えばエラー。
+    /// `other` と同じか後の時刻か。
+    ///
+    /// # Errors
+    ///
+    /// 時刻基準が違うとき。
     pub fn is_at_or_after(self, other: Self) -> Result<bool, TimebaseMismatch> {
         self.ensure_same(other)?;
         Ok(self.nanos >= other.nanos)
@@ -100,26 +113,38 @@ mod tests {
 
     #[test]
     fn differences_require_same_timebase() {
-        let a = PcTime::monotonic(5_000);
-        let b = PcTime::monotonic(2_000);
-        assert_eq!(a.since(b), Ok(TimeDelta::from_nanos(3_000)));
-        assert_eq!(b.since(a), Ok(TimeDelta::from_nanos(-3_000)));
+        let later = PcTime::monotonic(5_000);
+        let earlier = PcTime::monotonic(2_000);
+        assert_eq!(later.since(earlier), Ok(TimeDelta::from_nanos(3_000)));
+        assert_eq!(earlier.since(later), Ok(TimeDelta::from_nanos(-3_000)));
 
         let kernel = PcTime::new(Timebase::KernelRealtime, 2_000);
         assert_eq!(
-            a.since(kernel),
+            later.since(kernel),
             Err(TimebaseMismatch {
                 left: Timebase::Monotonic,
                 right: Timebase::KernelRealtime,
             })
         );
-        assert!(a.is_at_or_after(kernel).is_err());
+        assert_eq!(
+            later.is_at_or_after(kernel).unwrap_err(),
+            TimebaseMismatch {
+                left: Timebase::Monotonic,
+                right: Timebase::KernelRealtime,
+            }
+        );
     }
 
     #[test]
     fn saturating_add_never_goes_below_zero() {
-        let t = PcTime::monotonic(1_000);
-        assert_eq!(t.saturating_add(TimeDelta::from_nanos(-5_000)).nanos(), 0);
-        assert_eq!(t.saturating_add(TimeDelta::from_nanos(500)).nanos(), 1_500);
+        let time = PcTime::monotonic(1_000);
+        assert_eq!(
+            time.saturating_add(TimeDelta::from_nanos(-5_000)).nanos(),
+            0
+        );
+        assert_eq!(
+            time.saturating_add(TimeDelta::from_nanos(500)).nanos(),
+            1_500
+        );
     }
 }

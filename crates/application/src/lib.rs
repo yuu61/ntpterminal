@@ -3,6 +3,8 @@
 //! I/O は直接行わず、すべてポート経由で行う。
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod acl;
 pub mod polling_policy;
 pub mod port;

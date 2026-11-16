@@ -1,22 +1,27 @@
+use core::net::{IpAddr, SocketAddr};
 use std::io;
-use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs as _;
 
 pub const NTP_PORT: u16 = 123;
 
 /// `192.168.1.123` / `ntp.example.com` / `host:123` / `[::1]:123` などを解決する。
 /// ポートを省略したら 123。複数のアドレスがあれば IPv4 を優先する。
+///
+/// # Errors
+///
+/// 名前を解決できない、またはアドレスが 1 つもないとき。
 pub fn resolve_server(input: &str) -> io::Result<SocketAddr> {
-    let input = input.trim();
-    if let Ok(addr) = input.parse::<SocketAddr>() {
+    let trimmed = input.trim();
+    if let Ok(addr) = trimmed.parse::<SocketAddr>() {
         return Ok(addr);
     }
-    if let Ok(ip) = input.parse::<IpAddr>() {
+    if let Ok(ip) = trimmed.parse::<IpAddr>() {
         return Ok(SocketAddr::new(ip, NTP_PORT));
     }
-    let candidates: Vec<SocketAddr> = if has_port(input) {
-        input.to_socket_addrs()?.collect()
+    let candidates: Vec<SocketAddr> = if has_port(trimmed) {
+        trimmed.to_socket_addrs()?.collect()
     } else {
-        (input, NTP_PORT).to_socket_addrs()?.collect()
+        (trimmed, NTP_PORT).to_socket_addrs()?.collect()
     };
     candidates
         .iter()
@@ -26,7 +31,7 @@ pub fn resolve_server(input: &str) -> io::Result<SocketAddr> {
         .ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,
-                format!("{input} のアドレスが見つかりません"),
+                format!("{trimmed} のアドレスが見つかりません"),
             )
         })
 }

@@ -1,0 +1,9 @@
+# rustfmt の設定。stable で使えるオプションだけを置く
+# （imports_granularity などの nightly 専用オプションは stable では警告が出るだけで効かない）。
+
+# エディタが rustfmt を単体のファイルに対して呼んだときも、cargo fmt と同じ edition で整形する
+edition = "2024"
+# .gitattributes（eol=lf）に合わせる。Windows で整形しても CRLF にしない
+newline_style = "Unix"
+# `Foo { x: x }` を `Foo { x }` にする
+use_field_init_shorthand = true

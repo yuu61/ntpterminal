@@ -2,13 +2,17 @@
 //!
 //! 疑似サーバは 127.0.0.1 に bind する（Windows のファイアウォール確認を避けるため）。
 
-use std::net::{SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
+extern crate alloc;
+
+use alloc::sync::Arc;
+use core::net::{Ipv4Addr, SocketAddr};
+use core::time::Duration;
+use std::io;
+use std::net::UdpSocket;
 
 use application::port::{ClockPort, EventSink};
 use application::snapshot::SyncSnapshot;
-use application::usecase::{OnceError, SyncService, query_once};
+use application::usecase::{OnceError, OnceOutcome, SyncService, query_once};
 use domain::packet_crafting::RequestTemplate;
 use domain::shared_kernel::TimeDelta;
 use domain::time_sync::{SourceConfig, SyncEvent, SyncState};
@@ -18,10 +22,10 @@ use infrastructure::sim_server::{SimServer, SimServerConfig};
 use infrastructure::transport::UdpTransport;
 
 fn loopback_any_port() -> SocketAddr {
-    "127.0.0.1:0".parse().unwrap()
+    SocketAddr::from((Ipv4Addr::LOCALHOST, 0))
 }
 
-fn spawn_server(offset_ms: i64) -> SimServer {
+fn spawn_server(offset_ms: i64) -> io::Result<SimServer> {
     SimServer::spawn(
         loopback_any_port(),
         SimServerConfig {
@@ -29,15 +33,12 @@ fn spawn_server(offset_ms: i64) -> SimServer {
             ..SimServerConfig::default()
         },
     )
-    .unwrap()
 }
 
-fn once(
-    server: SocketAddr,
-    timeout: Duration,
-) -> Result<application::usecase::OnceOutcome, OnceError> {
+fn once(server: SocketAddr, timeout: Duration) -> Result<OnceOutcome, OnceError> {
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport = UdpTransport::connect(server, Arc::clone(&clock)).unwrap();
+    let transport = UdpTransport::connect(server, Arc::clone(&clock))
+        .map_err(|error| OnceError::Transport(error.to_string()))?;
     query_once(
         transport,
         RandomNonce::new(),
@@ -49,11 +50,11 @@ fn once(
 
 #[test]
 fn measures_positive_offset_when_server_is_ahead() {
-    let server = spawn_server(5);
+    let server = spawn_server(5).unwrap();
     let outcome = once(server.local_addr(), Duration::from_secs(2)).unwrap();
     let offset_ms = outcome.sample.offset().delta().as_millis_f64();
     assert!(
-        (offset_ms - 5.0).abs() < 2.0,
+        (offset_ms - 5.0).abs() < 2.0f64,
         "offset = {offset_ms} ms（+5ms のはず）"
     );
     assert_eq!(outcome.server_info.stratum.value(), 1);
@@ -62,11 +63,11 @@ fn measures_positive_offset_when_server_is_ahead() {
 
 #[test]
 fn measures_negative_offset_when_server_is_behind() {
-    let server = spawn_server(-7);
+    let server = spawn_server(-7).unwrap();
     let outcome = once(server.local_addr(), Duration::from_secs(2)).unwrap();
     let offset_ms = outcome.sample.offset().delta().as_millis_f64();
     assert!(
-        (offset_ms + 7.0).abs() < 2.0,
+        (offset_ms + 7.0).abs() < 2.0f64,
         "offset = {offset_ms} ms（-7ms のはず）"
     );
 }
@@ -106,7 +107,7 @@ impl EventSink for Recorder {
 
 #[test]
 fn continuous_polling_collects_every_sample() {
-    let server = spawn_server(3);
+    let server = spawn_server(3).unwrap();
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let transport = UdpTransport::connect(server.local_addr(), Arc::clone(&clock)).unwrap();
     let mut service = SyncService::new(
@@ -129,7 +130,7 @@ fn continuous_polling_collects_every_sample() {
     let projected = snapshot.anchor.unwrap().project(now.mono).unwrap();
     let diff_ms = projected.wrapping_since(now.wall).as_millis_f64();
     assert!(
-        (diff_ms - 3.0).abs() < 2.0,
+        (diff_ms - 3.0).abs() < 2.0f64,
         "diff = {diff_ms} ms（+3ms のはず）"
     );
 }
