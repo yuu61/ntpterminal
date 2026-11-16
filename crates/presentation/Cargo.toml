@@ -1,0 +1,19 @@
+[package]
+name = "ntpterminal-presentation"
+description = "プレゼンテーション層: CLI 出力（M1）と TUI（M2 予定）"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+# コード上は `presentation::...` で参照する（パッケージ名の接頭辞を省く）
+[lib]
+name = "presentation"
+
+[dependencies]
+domain.workspace = true
+application.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true
