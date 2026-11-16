@@ -6,15 +6,18 @@ use super::{NtpTimestamp, TimeDelta};
 ///
 /// 送信方式（UDP / raw / link）は実行時に選ぶので、時刻基準も実行時の値として持つ。
 /// 異なる時刻基準の時刻どうしは比較も差分もできない（[`TimebaseMismatch`]）。
+///
+/// 実際には、カーネルや NIC の時刻は transport の中でモノトニック時計に写してから渡すので、
+/// ドメインに届くのは `Monotonic` だけ。ほかの値は予約で、混ざったときの安全網として残している。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Timebase {
     /// ユーザ空間で読んだプロセス内のモノトニック時計。
     Monotonic,
-    /// カーネルが付けた CLOCK_REALTIME のタイムスタンプ（Linux。M4 予定）。
+    /// カーネルが付けた CLOCK_REALTIME のタイムスタンプ（予約）。
     KernelRealtime,
-    /// Windows のソフトウェアタイムスタンプ（QPC。M4 予定）。
+    /// Windows のソフトウェアタイムスタンプ（QPC。予約）。
     WindowsQpc,
-    /// NIC のハードウェア時計（PHC）。`index` は /dev/ptpN の番号など（M4 予定）。
+    /// NIC のハードウェア時計（PHC）。`index` は /dev/ptpN の番号など（予約）。
     NicPhc { index: u32 },
 }
 

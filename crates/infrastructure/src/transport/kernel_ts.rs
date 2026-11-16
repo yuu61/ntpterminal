@@ -10,6 +10,8 @@
 //!
 //! カーネルの時刻は CLOCK_REALTIME なので、[`rebase_kernel_time`] でモノトニック時計に写してから使う。
 //! ドメインには常にモノトニック時計の時刻だけを渡す。
+//!
+//! 未確認: 32 bit の Linux（32 bit 版 Raspberry Pi OS など）では制御メッセージの時刻の形式が違う可能性がある。
 
 use std::io::{self, IoSliceMut};
 use std::os::fd::{AsFd, AsRawFd};

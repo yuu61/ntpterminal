@@ -17,10 +17,17 @@ set -eu
 BIN=$1
 fail() { echo "NG: $*"; exit 1; }
 
+# 起動したプロセスは終了時に必ず止める（残ると呼び出し元のパイプが閉じず、待ち続けてしまう）
+PIDS=""
+cleanup() { for pid in $PIDS; do kill "$pid" 2>/dev/null || true; done; }
+trap cleanup EXIT
+
 # 相手側の名前空間（sleep が生きている間だけある）
 unshare -n sleep 60 &
 PEER=$!
+PIDS="$PIDS $PEER"
 sleep 0.2
+# バックグラウンドで動かすものは関数を通さず nsenter で直接起動する（$! が本体の PID になるように）
 peer() { nsenter -t "$PEER" -n "$@"; }
 
 ip link set lo up
@@ -40,8 +47,10 @@ peer ip link set v1.10 up
 # /sys は元の名前空間のものなので、MAC は ip link から読む
 PEER_MAC=$(peer ip -o link show v1 | sed -n 's/.*link\/ether \([0-9a-f:]*\).*/\1/p')
 [ -n "$PEER_MAC" ] || fail "相手の MAC が取れない"
-peer "$BIN" sim-server --bind 10.0.0.2:12300 --offset-ms -0.978 --refid GNSS 2>/dev/null &
-peer "$BIN" sim-server --bind 10.0.10.2:12300 --offset-ms -0.978 --refid VLAN 2>/dev/null &
+nsenter -t "$PEER" -n "$BIN" sim-server --bind 10.0.0.2:12300 --offset-ms -0.978 --refid GNSS >/dev/null 2>&1 &
+PIDS="$PIDS $!"
+nsenter -t "$PEER" -n "$BIN" sim-server --bind 10.0.10.2:12300 --offset-ms -0.978 --refid VLAN >/dev/null 2>&1 &
+PIDS="$PIDS $!"
 sleep 0.3
 
 echo "== 1〜2: 近隣表が空の状態で link モード（自前の ARP → 実際の MAC へ送信）=="
@@ -52,8 +61,9 @@ echo "$OUT" | grep -q "link（v0 → $PEER_MAC）" || fail "宛先 MAC が相手
 echo "OK: ARP で $PEER_MAC を調べて送れた"
 
 echo "== 3: VLAN 10 / PCP 5 のタグ付きで送る =="
-peer tcpdump -Z root -l -n -e -c 1 -i v1 'vlan 10 and udp dst port 12300' > /tmp/vlan_capture.txt 2>/dev/null &
+nsenter -t "$PEER" -n tcpdump -Z root -l -n -e -c 1 -i v1 'vlan 10 and udp dst port 12300' > /tmp/vlan_capture.txt 2>/dev/null &
 TCPDUMP=$!
+PIDS="$PIDS $TCPDUMP"
 sleep 0.5
 OUT=$("$BIN" once 10.0.10.2:12300 --transport link --vlan 10 --pcp 5 --timestamping user --timeout-ms 1000) || fail "VLAN 付きの問い合わせに失敗: $OUT"
 echo "$OUT" | grep -E "Ref ID|送信方式"
@@ -68,6 +78,5 @@ echo "$OUT" | grep -E "タイムスタンプ"
 echo "$OUT" | grep -q "タイムスタンプ *カーネル$" || fail "カーネルの時刻が使われていない"
 echo "OK: 送受信ともカーネルの時刻"
 
-kill "$PEER" 2>/dev/null || true
 echo "すべて OK"
 INNER

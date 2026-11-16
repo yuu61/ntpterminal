@@ -4,6 +4,8 @@
 //! - `raw_ip`: raw ソケットで IPv4 / UDP ヘッダから作る。Linux のみ（M3）
 //! - `link`: AF_PACKET で Ethernet フレームから作る。Linux のみ（M4）
 //! - `kernel_ts`: カーネルのタイムスタンプ（SO_TIMESTAMPING）。Linux のみ（M4）
+//!
+//! ヘッダを自由に作れるモードでも、送信元 IP は経路に合った自分のアドレスを入れる。偽る手段は作らない。
 
 #[cfg(target_os = "linux")]
 mod kernel_ts;

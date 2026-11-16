@@ -203,6 +203,7 @@ fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
     buf.set_line(x, y, line, area.right().saturating_sub(x));
 }
 
+/// 座標の計算はすべて `u16` の飽和演算（`saturating_*`）で行う。端末を極端に縮めてもパニックしないように。
 impl Widget for &ScreenModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 / (空行 / 最下部の一文)
