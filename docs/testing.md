@@ -8,7 +8,7 @@ sh scripts/privileged_tests.sh
 
 raw ソケット / AF_PACKET を使う `#[ignore]` のテストと、veth でつないだ 2 つの名前空間での link モードの確認
 （実際の MAC・自前の ARP・VLAN タグ）をまとめて実行する。root 不要で、ホストのネットワークには触らない。
-Windows では WSL の中で動かす。
+Windows では WSL の中で動かす。CI でも `privileged` ジョブ（ubuntu-24.04）で毎回実行する。
 
 ## TUI を端末で確かめる
 

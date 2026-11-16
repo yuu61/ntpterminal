@@ -50,8 +50,30 @@ jobs:
       - run: cargo doc --workspace --no-deps --locked
         env:
           RUSTDOCFLAGS: -D warnings
-      # raw ソケット / AF_PACKET を使う #[ignore] のテストは scripts/privileged_tests.sh で別に確かめる
+      # raw ソケット / AF_PACKET を使う #[ignore] のテストは下の privileged ジョブで確かめる
       - run: cargo test --workspace --locked
+
+  privileged:
+    name: privileged tests (raw ソケット / AF_PACKET)
+    # 下の AppArmor の設定は版によって変わるので、ランナーの更新で突然落ちないよう固定する
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: Swatinem/rust-cache@v2
+      # どれも名前空間の外（ホスト）でしかできない準備:
+      # - Ubuntu 24.04 は AppArmor で、root でないユーザが unshare で作った名前空間から権限を取り上げる
+      # - veth と VLAN のカーネルモジュールは名前空間の中からは読み込めない
+      - run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          sudo modprobe -a veth 8021q
+          command -v tcpdump || { sudo apt-get update && sudo apt-get install -y tcpdump; }
+      - run: sh scripts/privileged_tests.sh
+      # tcpdump などが AppArmor に止められると、スクリプトの出力だけでは原因がわからない
+      - if: failure()
+        run: sudo dmesg | grep -i -E 'apparmor|denied' | tail -n 50 || true
 
   shellcheck:
     name: shellcheck
