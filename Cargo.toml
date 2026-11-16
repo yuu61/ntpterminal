@@ -21,9 +21,12 @@ clap = { version = "4.6.7", features = ["derive"] }
 # crossterm は単独で入れず `ratatui::crossterm` を使う（バージョンの食い違いを防ぐ）
 ratatui = "0.30.2"
 nix = { version = "0.32.0", features = ["socket", "uio", "time", "poll", "net"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
+# 設定ファイルの読み込みだけに使う（書き出しの display は使わない）
+toml = { version = "1.2.1", default-features = false, features = ["std", "serde", "parse"] }
 
 [workspace.lints.rust]
 # rustc の lint のうち既定で無効なものも、すべて有効にする（まとめて有効にするグループがないので列挙する）。
@@ -179,6 +182,8 @@ infrastructure.workspace = true
 presentation.workspace = true
 anyhow.workspace = true
 clap.workspace = true
+serde.workspace = true
+toml.workspace = true
 
 [lints]
 workspace = true

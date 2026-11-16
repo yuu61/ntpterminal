@@ -15,6 +15,8 @@ BIN=${1:?"ntpterminal のパスを指定してください"}
 exec unshare -rn sh -s "${BIN}" <<'INNER'
 set -eu
 BIN=$1
+# ntpterminal はカレントディレクトリの config.toml を読むので、手元の設定に左右されないよう
+# どの呼び出しにも --config /dev/null（空の設定）を付ける
 fail() { echo "NG: $*"; exit 1; }
 
 # 起動したプロセスは終了時に必ず止める（残ると呼び出し元のパイプが閉じず、待ち続けてしまう）
@@ -47,15 +49,15 @@ peer ip link set v1.10 up
 # /sys は元の名前空間のものなので、MAC は ip link から読む
 PEER_MAC=$(peer ip -o link show v1 | sed -n 's/.*link\/ether \([0-9a-f:]*\).*/\1/p')
 [ -n "$PEER_MAC" ] || fail "相手の MAC が取れない"
-nsenter -t "$PEER" -n "$BIN" sim-server --bind 10.0.0.2:12300 --offset-ms -0.978 --refid GNSS >/dev/null 2>&1 &
+nsenter -t "$PEER" -n "$BIN" --config /dev/null sim-server --bind 10.0.0.2:12300 --offset-ms -0.978 --refid GNSS >/dev/null 2>&1 &
 PIDS="$PIDS $!"
-nsenter -t "$PEER" -n "$BIN" sim-server --bind 10.0.10.2:12300 --offset-ms -0.978 --refid VLAN >/dev/null 2>&1 &
+nsenter -t "$PEER" -n "$BIN" --config /dev/null sim-server --bind 10.0.10.2:12300 --offset-ms -0.978 --refid VLAN >/dev/null 2>&1 &
 PIDS="$PIDS $!"
 sleep 0.3
 
 echo "== 1〜2: 近隣表が空の状態で link モード（自前の ARP → 実際の MAC へ送信）=="
 [ -z "$(ip neigh show dev v0)" ] || fail "近隣表が空ではない"
-OUT=$("$BIN" once 10.0.0.2:12300 --transport link --timestamping user --timeout-ms 1000) || fail "問い合わせに失敗: $OUT"
+OUT=$("$BIN" --config /dev/null once 10.0.0.2:12300 --transport link --timestamping user --timeout-ms 1000) || fail "問い合わせに失敗: $OUT"
 echo "$OUT" | grep -E "オフセット|Ref ID|送信方式"
 echo "$OUT" | grep -q "link（v0 → $PEER_MAC）" || fail "宛先 MAC が相手の MAC（$PEER_MAC）ではない"
 echo "OK: ARP で $PEER_MAC を調べて送れた"
@@ -65,7 +67,7 @@ nsenter -t "$PEER" -n tcpdump -Z root -l -n -e -c 1 -i v1 'vlan 10 and udp dst p
 TCPDUMP=$!
 PIDS="$PIDS $TCPDUMP"
 sleep 0.5
-OUT=$("$BIN" once 10.0.10.2:12300 --transport link --vlan 10 --pcp 5 --timestamping user --timeout-ms 1000) || fail "VLAN 付きの問い合わせに失敗: $OUT"
+OUT=$("$BIN" --config /dev/null once 10.0.10.2:12300 --transport link --vlan 10 --pcp 5 --timestamping user --timeout-ms 1000) || fail "VLAN 付きの問い合わせに失敗: $OUT"
 echo "$OUT" | grep -E "Ref ID|送信方式"
 echo "$OUT" | grep -q "VLAN" || fail "VLAN 側の疑似サーバの応答ではない"
 wait "$TCPDUMP" || true
@@ -73,7 +75,7 @@ grep -E "vlan 10, p 5" /tmp/vlan_capture.txt || fail "相手側で VLAN 10 / PCP
 echo "OK: VLAN 10 / PCP 5 のタグが付いたまま届き、応答を受け取れた"
 
 echo "== 4: link モード + カーネルのタイムスタンプ =="
-OUT=$("$BIN" once 10.0.0.2:12300 --transport link --timestamping kernel --timeout-ms 1000) || fail "失敗: $OUT"
+OUT=$("$BIN" --config /dev/null once 10.0.0.2:12300 --transport link --timestamping kernel --timeout-ms 1000) || fail "失敗: $OUT"
 echo "$OUT" | grep -E "タイムスタンプ"
 echo "$OUT" | grep -q "タイムスタンプ *カーネル$" || fail "カーネルの時刻が使われていない"
 echo "OK: 送受信ともカーネルの時刻"

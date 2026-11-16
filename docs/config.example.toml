@@ -1,0 +1,63 @@
+# ntpterminal の設定ファイルの例（全項目）。使う行のコメントを外して使う。
+#
+#   ntpterminal tui                                     # カレントディレクトリの config.toml を読む（なければ読まない）
+#   ntpterminal --config booth.toml tui                 # ほかのファイルを読む
+#   ntpterminal tui --config booth.toml 192.168.1.124   # 引数で指定したもの（ここではサーバ）が優先される
+#   ntpterminal --config /dev/null tui 127.0.0.1:12300  # 設定ファイルを読まない（空の設定。Windows では NUL）
+#
+# - キーはコマンドラインの長いオプションと同じ名前で、値の書き方も同じ（--interval-ms 200 → interval-ms = 200）
+# - 優先順位はコマンドライン → 設定ファイル → 既定値。下の値はどれも例
+# - 真偽の項目（trend / json / no-df）を true にすると、コマンドラインからは false に戻せない
+# - 知らないキーや範囲外の値はエラーになる。--allow-fast-poll は書けない（毎回コマンドラインで指定する）
+# - 共通の項目は、最初の [tui] などの節より前に書く（TOML では、節の後に書いたキーはその節のものになる）
+
+# ---- tui / once / stats に共通 ----
+
+# NTP サーバ（ポート省略時は 123）
+# server = "192.168.1.123"
+
+# 表示用のタイムゾーン（tui / once。既定: +09:00 / JST）
+# tz = "+09:00"
+# tz-label = "JST"
+
+# 送信方式: udp（既定）/ raw-ip / link。raw-ip と link は Linux のみで、root か CAP_NET_RAW が必要
+# transport = "link"
+# タイムスタンプ: auto（既定）/ kernel / user
+# timestamping = "auto"
+# 送信元ポート（省略時は OS に任せる）
+# source-port = 40000
+
+# raw-ip / link のみ: IPv4 / UDP ヘッダ（udp で指定するとエラー）
+# ttl = 64
+# dscp = 46
+# ecn = 0
+# ip-id = 0
+# no-df = false
+# udp-checksum = "compute"
+
+# link のみ: IP ヘッダのチェックサム（試験用の固定値）と Ethernet ヘッダ
+# ip-checksum = "0x1234"
+# dst-mac = "aa:bb:cc:dd:ee:ff"
+# vlan = 10
+# pcp = 5
+
+[tui]
+# interval-ms = 500
+# title = "NTP CLOCK"
+# footer = "Sponsored by ..."
+# trend = true
+
+[once]
+# timeout-ms = 1000
+# json = false
+
+[stats]
+# interval-ms = 500
+# count = 20
+# json = false
+
+[sim-server]
+# bind = "127.0.0.1:12300"
+# offset-ms = -0.978
+# stratum = 1
+# refid = "GNSS"
