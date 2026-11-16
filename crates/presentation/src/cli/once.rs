@@ -12,7 +12,12 @@ use crate::format::{
 };
 
 /// 人が読む形式。
-pub fn render_text(server: SocketAddr, outcome: &OnceOutcome, zone: &DisplayZone) -> String {
+pub fn render_text(
+    server: SocketAddr,
+    transport: &str,
+    outcome: &OnceOutcome,
+    zone: &DisplayZone,
+) -> String {
     let OnceOutcome {
         sample,
         server_info,
@@ -41,12 +46,13 @@ pub fn render_text(server: SocketAddr, outcome: &OnceOutcome, zone: &DisplayZone
             "サーバ時刻",
             format_date_time(sample.server_transmit(), zone),
         ),
+        ("送信方式", transport.to_string()),
     ];
     render_rows(&rows)
 }
 
 /// JSON（1 行）。
-pub fn render_json(server: SocketAddr, outcome: &OnceOutcome) -> String {
+pub fn render_json(server: SocketAddr, transport: &str, outcome: &OnceOutcome) -> String {
     let OnceOutcome {
         sample,
         server_info,
@@ -54,6 +60,7 @@ pub fn render_json(server: SocketAddr, outcome: &OnceOutcome) -> String {
     json!({
         "ok": true,
         "server": server.to_string(),
+        "transport": transport,
         "offset_ms": sample.offset().delta().as_millis_f64(),
         "delay_ms": sample.delay().delta().as_millis_f64(),
         "stratum": server_info.stratum.value(),

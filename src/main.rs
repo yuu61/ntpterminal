@@ -13,17 +13,17 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use application::polling_policy;
-use application::port::ClockPort;
+use application::port::{ClockPort, PacketPort};
 use application::usecase::{SyncService, query_once};
-use clap::{Args, Parser, Subcommand};
-use domain::packet_crafting::RequestTemplate;
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use domain::packet_crafting::{HeaderTemplate, Ipv4Spec, RequestTemplate, UdpChecksum};
 use domain::shared_kernel::TimeDelta;
 use domain::time_sync::SourceConfig;
 use infrastructure::clock::SystemClock;
 use infrastructure::nonce::RandomNonce;
 use infrastructure::resolve::resolve_server;
 use infrastructure::sim_server::{SimServer, SimServerConfig};
-use infrastructure::transport::UdpTransport;
+use infrastructure::transport::{self as transport_layer, TransportMode, TransportOptions};
 use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
 use presentation::format::DisplayZone;
@@ -71,6 +71,98 @@ struct ZoneArgs {
     tz_label: String,
 }
 
+/// 送信方式（CLI での指定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum ModeArg {
+    /// 標準の UDP ソケット（権限不要・全 OS）
+    Udp,
+    /// IPv4 / UDP ヘッダを自作して raw ソケットで送る（Linux のみ・root か CAP_NET_RAW が必要）
+    RawIp,
+}
+
+#[derive(Args)]
+struct TransportArgs {
+    /// 送信方式
+    #[arg(long = "transport", value_enum, default_value_t = ModeArg::Udp)]
+    mode: ModeArg,
+    /// 送信元ポート（省略時は OS に任せる）
+    #[arg(long)]
+    source_port: Option<u16>,
+    /// [raw-ip] IP の TTL
+    #[arg(long)]
+    ttl: Option<u8>,
+    /// [raw-ip] DSCP（0〜63。例: 46 = EF）
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
+    dscp: Option<u8>,
+    /// [raw-ip] ECN（0〜3）
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+    ecn: Option<u8>,
+    /// [raw-ip] IP の Identification（0 なら Linux のカーネルが値を入れる）
+    #[arg(long)]
+    ip_id: Option<u16>,
+    /// [raw-ip] DF（Don't Fragment）ビットを立てない
+    #[arg(long)]
+    no_df: bool,
+    /// [raw-ip] UDP チェックサム: compute（既定）/ zero / 0x で始まる 16 進の固定値（試験用）
+    #[arg(long, value_parser = parse_udp_checksum)]
+    udp_checksum: Option<UdpChecksum>,
+}
+
+impl TransportArgs {
+    fn mode(&self) -> TransportMode {
+        match self.mode {
+            ModeArg::Udp => TransportMode::Udp,
+            ModeArg::RawIp => TransportMode::RawIp,
+        }
+    }
+
+    /// ヘッダの指定が 1 つでもあれば `headers` を作る（UDP モードでは open がエラーにする）。
+    fn options(&self) -> TransportOptions {
+        let specified = self.ttl.is_some()
+            || self.dscp.is_some()
+            || self.ecn.is_some()
+            || self.ip_id.is_some()
+            || self.no_df
+            || self.udp_checksum.is_some();
+        let defaults = Ipv4Spec::default();
+        let headers = specified.then(|| HeaderTemplate {
+            ipv4: Ipv4Spec {
+                dscp: self.dscp.unwrap_or(defaults.dscp),
+                ecn: self.ecn.unwrap_or(defaults.ecn),
+                identification: self.ip_id.unwrap_or(defaults.identification),
+                dont_fragment: !self.no_df,
+                ttl: self.ttl.unwrap_or(defaults.ttl),
+            },
+            udp_checksum: self.udp_checksum.unwrap_or_default(),
+        });
+        TransportOptions {
+            source_port: self.source_port.unwrap_or(0),
+            headers,
+        }
+    }
+
+    fn open(
+        &self,
+        server: SocketAddr,
+        clock: Arc<dyn ClockPort>,
+    ) -> anyhow::Result<Box<dyn PacketPort>> {
+        transport_layer::open(self.mode(), server, self.options(), clock)
+            .context("送受信の準備ができません")
+    }
+}
+
+fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
+    match text {
+        "compute" => Ok(UdpChecksum::Compute),
+        "zero" => Ok(UdpChecksum::Zero),
+        _ => text
+            .strip_prefix("0x")
+            .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+            .map(UdpChecksum::Fixed)
+            .ok_or_else(|| "compute / zero / 0x1234 の形式で指定してください".to_string()),
+    }
+}
+
 impl ZoneArgs {
     fn zone(&self) -> anyhow::Result<DisplayZone> {
         let offset = DisplayZone::parse_offset(&self.tz).map_err(anyhow::Error::msg)?;
@@ -96,6 +188,8 @@ struct TuiArgs {
     footer: Option<String>,
     #[command(flatten)]
     zone: ZoneArgs,
+    #[command(flatten)]
+    transport: TransportArgs,
 }
 
 #[derive(Args)]
@@ -107,6 +201,8 @@ struct OnceArgs {
     timeout_ms: u64,
     #[command(flatten)]
     zone: ZoneArgs,
+    #[command(flatten)]
+    transport: TransportArgs,
 }
 
 #[derive(Args)]
@@ -122,6 +218,8 @@ struct StatsArgs {
     /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること）
     #[arg(long)]
     allow_fast_poll: bool,
+    #[command(flatten)]
+    transport: TransportArgs,
 }
 
 #[derive(Args)]
@@ -169,8 +267,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     // 同期スレッドと UI は必ず同じ時計インスタンスを使う。
     // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport =
-        UdpTransport::connect(server, Arc::clone(&clock)).context("UDP ソケットを開けません")?;
+    let transport = args.transport.open(server, Arc::clone(&clock))?;
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,
@@ -195,6 +292,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         server_label: args.server.trim().to_string(),
         footer: args.footer.clone(),
         zone,
+        transport: args.transport.mode().label().to_string(),
     };
     let result = tui::run(&config, clock, rx);
 
@@ -208,8 +306,7 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     let zone = args.zone.zone()?;
     let server = resolve(&args.target.server)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport =
-        UdpTransport::connect(server, Arc::clone(&clock)).context("UDP ソケットを開けません")?;
+    let transport = args.transport.open(server, Arc::clone(&clock))?;
 
     let result = query_once(
         transport,
@@ -220,11 +317,17 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     );
     match result {
         Ok(outcome) if args.target.json => {
-            println!("{}", once::render_json(server, &outcome));
+            println!(
+                "{}",
+                once::render_json(server, args.transport.mode().label(), &outcome)
+            );
             Ok(ExitCode::SUCCESS)
         }
         Ok(outcome) => {
-            print!("{}", once::render_text(server, &outcome, &zone));
+            print!(
+                "{}",
+                once::render_text(server, args.transport.mode().label(), &outcome, &zone)
+            );
             Ok(ExitCode::SUCCESS)
         }
         Err(error) if args.target.json => {
@@ -245,8 +348,7 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
         polling_policy::check_interval(server.ip(), interval)?;
     }
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport =
-        UdpTransport::connect(server, Arc::clone(&clock)).context("UDP ソケットを開けません")?;
+    let transport = args.transport.open(server, Arc::clone(&clock))?;
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,
@@ -259,7 +361,7 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     if args.count == 0 {
         reporter = reporter.with_periodic_summary(20);
     }
-    reporter.write_header(interval);
+    reporter.write_header(interval, args.transport.mode().label());
     service.run(&mut reporter, (args.count > 0).then_some(args.count));
     reporter.write_summary();
     Ok(ExitCode::SUCCESS)

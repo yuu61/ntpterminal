@@ -47,6 +47,17 @@ pub trait PacketPort: Send {
     fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError>;
 }
 
+/// 送信モードを実行時に選べるよう、`Box<dyn PacketPort>` もポートとして使えるようにする。
+impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
+    fn send(&mut self, payload: &[u8]) -> Result<LocalStamp, TransportError> {
+        (**self).send(payload)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError> {
+        (**self).recv(timeout)
+    }
+}
+
 /// ドメインイベントの通知先（CLI 出力・TUI・ログなど）。
 pub trait EventSink {
     fn publish(&mut self, event: &SyncEvent, snapshot: &SyncSnapshot);

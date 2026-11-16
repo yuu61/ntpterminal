@@ -78,11 +78,11 @@ impl<W: Write> StatsReporter<W> {
     }
 
     /// 開始時の見出し（テキスト形式のときだけ）。
-    pub fn write_header(&mut self, interval: Duration) {
+    pub fn write_header(&mut self, interval: Duration, transport: &str) {
         if !self.json {
             let _ = writeln!(
                 self.out,
-                "{} に {} ms 間隔で問い合わせます",
+                "{} に {} ms 間隔で問い合わせます（送信方式: {transport}）",
                 self.server,
                 interval.as_millis()
             );
