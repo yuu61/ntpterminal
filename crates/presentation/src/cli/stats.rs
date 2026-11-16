@@ -193,6 +193,8 @@ impl<W: Write> StatsReporter<W> {
                 let counts = status.counts();
                 json!({
                     "kernel_enabled": counts.kernel_enabled,
+                    "hardware_enabled": counts.hardware_enabled,
+                    "hardware_samples": counts.hardware_samples,
                     "kernel_samples": counts.kernel_samples,
                     "user_samples": counts.user_samples,
                     "tx_misses": counts.tx_misses,

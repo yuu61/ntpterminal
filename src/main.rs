@@ -149,6 +149,8 @@ enum TimestampingArg {
     Kernel,
     /// ユーザ空間で時計を読む
     User,
+    /// NIC のハードウェアタイムスタンプ（Linux のみ・root が必要。NIC で無効なら有効にして、終了時に戻す。使えなければエラー）
+    Hardware,
 }
 
 #[derive(Args, Clone, Copy)]
@@ -241,6 +243,7 @@ impl TransportArgs {
                 TimestampingArg::Auto => TimestampingMode::Auto,
                 TimestampingArg::Kernel => TimestampingMode::Kernel,
                 TimestampingArg::User => TimestampingMode::User,
+                TimestampingArg::Hardware => TimestampingMode::Hardware,
             },
         }
     }

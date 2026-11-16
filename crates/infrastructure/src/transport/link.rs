@@ -37,7 +37,8 @@ use socket2::Socket;
 use self::interface::{Interface, LinkKind, find_interface, link_addr};
 use self::neighbor::{find_neighbor, next_hop, parse_routes};
 use super::LinkOptions;
-use super::kernel_ts::{KernelTimestamper, recv_with_timestamp_from};
+use super::hardware_ts::HardwareClock;
+use super::kernel_ts::{KernelTimes, KernelTimestamper, recv_with_timestamp_from};
 use super::udp::bind_connected;
 
 /// `sockaddr_ll.sll_pkttype`: 自分が送ったフレームの写し
@@ -139,6 +140,27 @@ impl LinkTransport {
         Ok(())
     }
 
+    /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
+    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。
+    ///
+    /// # Errors
+    ///
+    /// 経路の NIC がハードウェアタイムスタンプに対応していない、権限がない、またはソケットに設定できないとき。
+    pub fn enable_hardware_timestamps(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<String> {
+        let hardware = HardwareClock::prepare((*self.local.ip()).into())?;
+        let description = hardware.description();
+        self.kernel = Some(KernelTimestamper::enable_hardware(
+            &self.socket,
+            &self.socket,
+            status,
+            hardware,
+        )?);
+        Ok(description)
+    }
+
     /// 送信元（IP ヘッダに入れているアドレスとポート）。
     #[must_use]
     pub const fn local_addr(&self) -> SocketAddrV4 {
@@ -157,12 +179,12 @@ impl LinkTransport {
 
     /// 1 フレーム受信する。送信元のリンク層アドレス（パケットの種別を見るため）と、
     /// カーネルのタイムスタンプを使うときは受信時刻も返す。
-    fn receive_once(&mut self) -> io::Result<(usize, Option<i128>, Option<LinkAddr>)> {
+    fn receive_once(&mut self) -> io::Result<(usize, KernelTimes, Option<LinkAddr>)> {
         if self.kernel.is_some() {
             recv_with_timestamp_from::<LinkAddr, _>(&self.socket, &mut self.buf)
         } else {
             let (len, address) = recvfrom::<LinkAddr>(self.socket.as_raw_fd(), &mut self.buf)?;
-            Ok((len, None, address))
+            Ok((len, KernelTimes::default(), address))
         }
     }
 }
@@ -309,7 +331,7 @@ impl PacketPort for LinkTransport {
             self.socket
                 .set_read_timeout(Some(remaining.max(Duration::from_millis(1))))
                 .map_err(|error| TransportError::Io(error.to_string()))?;
-            let (len, kernel_time, address) = match self.receive_once() {
+            let (len, kernel_times, address) = match self.receive_once() {
                 Ok(received) => received,
                 Err(error) if error.kind() == ErrorKind::Interrupted => continue,
                 Err(error)
@@ -335,7 +357,7 @@ impl PacketPort for LinkTransport {
             };
             if packet.source == self.server && packet.destination == self.local {
                 let received = self.kernel.as_ref().map_or(observed, |kernel| {
-                    kernel.choose_received(kernel_time, observed)
+                    kernel.choose_received(kernel_times, observed)
                 });
                 return Ok(Some(Inbound {
                     payload: packet.payload.to_vec(),

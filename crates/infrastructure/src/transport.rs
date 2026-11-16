@@ -4,9 +4,12 @@
 //! - `raw_ip`: raw ソケットで IPv4 / UDP ヘッダから作る。Linux のみ
 //! - `link`: `AF_PACKET` で Ethernet フレームから作る。Linux のみ
 //! - `kernel_ts`: カーネルのタイムスタンプ（`SO_TIMESTAMPING`）。Linux のみ
+//! - `hardware_ts`: NIC のハードウェアのタイムスタンプ（PHC と NIC の設定）。Linux のみ
 //!
 //! ヘッダを自由に作れるモードでも、送信元 IP は経路に合った自分のアドレスを入れる。偽る手段は作らない。
 
+#[cfg(target_os = "linux")]
+mod hardware_ts;
 #[cfg(target_os = "linux")]
 mod kernel_ts;
 #[cfg(target_os = "linux")]
@@ -57,6 +60,9 @@ pub enum TimestampingMode {
     /// 使えればカーネル、使えなければユーザ空間
     #[default]
     Auto,
+    /// NIC のハードウェアのタイムスタンプ（Linux のみ・root）。NIC で無効なら有効にして、終了時に戻す。
+    /// 使えなければエラー（ハードウェアの時刻が取れない回は、ソフトウェアかユーザ空間の時刻になり、取得状況に出る）
+    Hardware,
 }
 
 /// link モードの指定（Ethernet ヘッダ）。
@@ -108,29 +114,39 @@ pub fn open(
 ) -> io::Result<OpenedTransport> {
     validate(mode, &options)?;
     match mode {
-        TransportMode::Udp => Ok(OpenedTransport {
-            port: Box::new(open_udp(server, &options, clock, &status)?),
-            description: mode.label().to_owned(),
-        }),
+        TransportMode::Udp => {
+            let (transport, hardware) = open_udp(server, &options, clock, status)?;
+            Ok(OpenedTransport {
+                port: Box::new(transport),
+                description: describe(mode.label().to_owned(), hardware),
+            })
+        }
         TransportMode::RawIp | TransportMode::Link => {
             open_linux_only(mode, server, options, clock, status)
         }
     }
 }
 
-/// UDP の送受信の口を開き、モードに応じてカーネルのタイムスタンプを有効にする。
+/// 画面に出す説明。ハードウェアのタイムスタンプを使うときは、使う NIC も足す。
+fn describe(base: String, hardware: Option<String>) -> String {
+    match hardware {
+        Some(nic) => format!("{base}・{nic}"),
+        None => base,
+    }
+}
+
+/// UDP の送受信の口を開き、モードに応じてカーネル（とハードウェア）のタイムスタンプを有効にする。
+/// ハードウェアを使うときは、その説明も返す。
 #[cfg(target_os = "linux")]
 fn open_udp(
     server: SocketAddr,
     options: &TransportOptions,
     clock: Arc<dyn ClockPort>,
-    status: &Arc<TimestampingStatus>,
-) -> io::Result<UdpTransport> {
+    status: Arc<TimestampingStatus>,
+) -> io::Result<(UdpTransport, Option<String>)> {
     let mut transport = UdpTransport::connect_from(server, options.source_port, clock)?;
-    apply_timestamping(options.timestamping, || {
-        transport.enable_kernel_timestamps(Arc::clone(status))
-    })?;
-    Ok(transport)
+    let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
+    Ok((transport, hardware))
 }
 
 /// UDP の送受信の口を開く（カーネルのタイムスタンプは Linux のみなので使わない）。
@@ -139,9 +155,12 @@ fn open_udp(
     server: SocketAddr,
     options: &TransportOptions,
     clock: Arc<dyn ClockPort>,
-    _status: &Arc<TimestampingStatus>,
-) -> io::Result<UdpTransport> {
-    UdpTransport::connect_from(server, options.source_port, clock)
+    _status: Arc<TimestampingStatus>,
+) -> io::Result<(UdpTransport, Option<String>)> {
+    Ok((
+        UdpTransport::connect_from(server, options.source_port, clock)?,
+        None,
+    ))
 }
 
 fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
@@ -156,6 +175,12 @@ fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 "カーネルのタイムスタンプは Linux のみ対応しています",
+            ));
+        }
+        if options.timestamping == TimestampingMode::Hardware {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "ハードウェアのタイムスタンプは Linux のみ対応しています",
             ));
         }
         if mode != TransportMode::Udp {
@@ -187,23 +212,75 @@ fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
     Ok(())
 }
 
-/// カーネルのタイムスタンプを、モードに応じて有効にする（Auto では失敗しても続ける）。
+/// タイムスタンプを有効にできる送受信の口（Linux）。
+#[cfg(target_os = "linux")]
+trait TimestampingTarget {
+    fn enable_kernel(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()>;
+    /// 画面に出す説明を返す。
+    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String>;
+}
+
+#[cfg(target_os = "linux")]
+impl TimestampingTarget for UdpTransport {
+    fn enable_kernel(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
+        self.enable_kernel_timestamps(status)
+    }
+
+    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+        self.enable_hardware_timestamps(status)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl TimestampingTarget for RawIpTransport {
+    fn enable_kernel(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
+        self.enable_kernel_timestamps(status)
+    }
+
+    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+        self.enable_hardware_timestamps(status)
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl TimestampingTarget for LinkTransport {
+    fn enable_kernel(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
+        self.enable_kernel_timestamps(status)
+    }
+
+    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+        self.enable_hardware_timestamps(status)
+    }
+}
+
+/// タイムスタンプを、モードに応じて有効にする（Auto では失敗しても続ける）。
+/// ハードウェアを使うときは、その説明を返す。
 #[cfg(target_os = "linux")]
 fn apply_timestamping(
     mode: TimestampingMode,
-    enable: impl FnOnce() -> io::Result<()>,
-) -> io::Result<()> {
+    target: &mut impl TimestampingTarget,
+    status: Arc<TimestampingStatus>,
+) -> io::Result<Option<String>> {
     match mode {
-        TimestampingMode::User => Ok(()),
-        TimestampingMode::Kernel => enable().map_err(|error| {
+        TimestampingMode::User => Ok(None),
+        TimestampingMode::Kernel => target
+            .enable_kernel(status)
+            .map(|()| None)
+            .map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("カーネルのタイムスタンプを有効にできません: {error}"),
+                )
+            }),
+        TimestampingMode::Hardware => target.enable_hardware(status).map(Some).map_err(|error| {
             io::Error::new(
                 error.kind(),
-                format!("カーネルのタイムスタンプを有効にできません: {error}"),
+                format!("ハードウェアのタイムスタンプを使えません: {error}"),
             )
         }),
         TimestampingMode::Auto => {
-            drop(enable());
-            Ok(())
+            drop(target.enable_kernel(status));
+            Ok(None)
         }
     }
 }
@@ -225,22 +302,18 @@ fn open_linux_only(
             options.link.unwrap_or_default(),
             clock,
         )?;
-        apply_timestamping(options.timestamping, || {
-            transport.enable_kernel_timestamps(status)
-        })?;
-        let description = transport.description();
+        let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
+        let description = describe(transport.description(), hardware);
         return Ok(OpenedTransport {
             port: Box::new(transport),
             description,
         });
     }
     let mut transport = RawIpTransport::connect(server, options.source_port, headers, clock)?;
-    apply_timestamping(options.timestamping, || {
-        transport.enable_kernel_timestamps(status)
-    })?;
+    let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
     Ok(OpenedTransport {
         port: Box::new(transport),
-        description: mode.label().to_owned(),
+        description: describe(mode.label().to_owned(), hardware),
     })
 }
 
@@ -280,6 +353,44 @@ mod tests {
         assert_eq!(
             result.err().map(|error| error.kind()),
             Some(io::ErrorKind::InvalidInput)
+        );
+    }
+
+    #[test]
+    fn hardware_timestamping_never_falls_back_silently() {
+        // Linux ではループバックに PHC がなく、Linux 以外ではそもそも使えないので、どちらもエラーになる
+        // （ソフトウェアの時刻に黙って切り替えない）
+        let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+        let status = Arc::new(TimestampingStatus::new());
+        let options = TransportOptions {
+            timestamping: TimestampingMode::Hardware,
+            ..TransportOptions::default()
+        };
+        let result = open(
+            TransportMode::Udp,
+            "127.0.0.1:123".parse().unwrap(),
+            options,
+            clock,
+            Arc::clone(&status),
+        );
+        assert_eq!(
+            result.err().map(|error| error.kind()),
+            Some(io::ErrorKind::Unsupported)
+        );
+        let counts = status.counts();
+        assert!(!counts.hardware_enabled, "{counts:?}");
+        assert!(!counts.kernel_enabled, "{counts:?}");
+    }
+
+    #[test]
+    fn description_names_the_hardware_clock() {
+        assert_eq!(describe("UDP ソケット".to_owned(), None), "UDP ソケット");
+        assert_eq!(
+            describe(
+                "UDP ソケット".to_owned(),
+                Some("nic0 の HW 時刻".to_owned())
+            ),
+            "UDP ソケット・nic0 の HW 時刻"
         );
     }
 

@@ -58,3 +58,23 @@ MIB は自動で判定する。`tui --snmp-mib` で固定もでき、固定し�
 
 情報欄の下の「直近 N 回の測定値」（推移のグラフ）は、`tui --trend` を付けたときだけ出す（既定では出さない）。
 付けても、出して時計の倍率が変わらない大きさの端末でだけ出る。120×40 なら出るが、80×24 では出ない。
+
+## ハードウェアタイムスタンプ（NIC の時計）
+
+`--timestamping hardware` は NIC の PHC の時刻を使う。CI には PHC を持つ NIC がないので、実機で確かめる
+（Linux・root。送信方式は udp / raw-ip / link のどれでも使える）。
+
+```sh
+ethtool -T eth0                                  # PHC と、受信フィルタの all（か ntp-all）があるか
+ethtool --get-hwtimestamp-cfg eth0               # 起動前の設定（off / none なら ntpterminal が有効にする）
+ntpterminal --config /dev/null stats --count 20 --timestamping hardware 192.168.1.123
+ethtool --get-hwtimestamp-cfg eth0               # 起動前と同じに戻っていること
+```
+
+「タイムスタンプ」の内訳が `ハードウェア 20 回` になり、送信方式に `eth0 の HW 時刻` が出れば使えている。
+NIC で無効だったときは `（一時的に有効化）` が付き、終了（Ctrl+C・SIGTERM・SIGHUP・メインスレッドの panic を含む）で
+元の設定に戻る。ブリッジ（Proxmox の vmbr0 など）越しでも、下の物理ポートを自動で選ぶ。
+
+e1000e は、NIC の送信が off のままソケットにハードウェアの送信時刻を頼むと、1 秒待って
+`clearing Tx timestamp hang` をカーネルのログに出す。確かめた後に `journalctl -k | grep -i hang` と
+`ethtool -S eth0 | grep hwtstamp` で増えていないことも見る。決まりごとの詳細は `transport/hardware_ts.rs` の先頭。

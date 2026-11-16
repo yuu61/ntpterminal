@@ -13,7 +13,7 @@ use std::io;
 
 use application::port::{ClockPort, EventSink, PacketPort};
 use application::snapshot::SyncSnapshot;
-use application::timestamping::TimestampingStatus;
+use application::timestamping::{TimestampSource, TimestampingStatus};
 use application::usecase::{OnceOutcome, SyncService, query_once};
 use domain::packet_crafting::RequestTemplate;
 use domain::shared_kernel::TimeDelta;
@@ -84,7 +84,12 @@ fn query_uses_kernel_time_for_both_send_and_receive() {
     assert_eq!(counts.kernel_samples, 1, "{counts:?}");
     assert_eq!(counts.user_samples, 0, "{counts:?}");
     assert_eq!(counts.tx_misses, 0, "送信時刻が取れていない: {counts:?}");
-    assert!(counts.last_was_kernel);
+    assert_eq!(counts.last_source, TimestampSource::Kernel);
+    assert!(
+        !counts.hardware_enabled,
+        "auto / kernel ではハードウェアを使わない"
+    );
+    assert_eq!(counts.hardware_samples, 0, "{counts:?}");
 }
 
 struct Ignore;

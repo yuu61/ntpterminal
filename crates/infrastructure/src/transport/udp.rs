@@ -11,6 +11,8 @@ use application::timestamping::TimestampingStatus;
 use domain::shared_kernel::LocalStamp;
 
 #[cfg(target_os = "linux")]
+use super::hardware_ts::HardwareClock;
+#[cfg(target_os = "linux")]
 use super::kernel_ts::{KernelTimestamper, recv_with_timestamp};
 
 /// 受信バッファの大きさ。拡張フィールド付きの応答も入る。
@@ -82,6 +84,28 @@ impl UdpTransport {
         Ok(())
     }
 
+    /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
+    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。root が必要。
+    ///
+    /// # Errors
+    ///
+    /// 経路の NIC がハードウェアタイムスタンプに対応していない、権限がない、またはソケットに設定できないとき。
+    #[cfg(target_os = "linux")]
+    pub fn enable_hardware_timestamps(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<String> {
+        let hardware = HardwareClock::prepare(self.socket.local_addr()?.ip())?;
+        let description = hardware.description();
+        self.kernel = Some(KernelTimestamper::enable_hardware(
+            &self.socket,
+            &self.socket,
+            status,
+            hardware,
+        )?);
+        Ok(description)
+    }
+
     /// bind したローカルのアドレス。
     ///
     /// # Errors
@@ -115,8 +139,8 @@ impl PacketPort for UdpTransport {
         #[cfg(target_os = "linux")]
         if let Some(kernel) = self.kernel.as_ref() {
             return match recv_with_timestamp(&self.socket, &mut self.buf) {
-                Ok((len, kernel_time)) => {
-                    let received = kernel.choose_received(kernel_time, self.clock.now());
+                Ok((len, kernel_times)) => {
+                    let received = kernel.choose_received(kernel_times, self.clock.now());
                     Ok(Some(Inbound {
                         payload: self.buf[..len].to_vec(),
                         received,
