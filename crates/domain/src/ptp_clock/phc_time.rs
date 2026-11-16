@@ -3,7 +3,7 @@ use crate::shared_kernel::{LocalStamp, NtpTimestamp};
 
 const NANOS_PER_SEC: i128 = 1_000_000_000;
 
-/// PHC の時刻（PHC の時計の値。1970-01-01 起点のナノ秒）。
+/// PTP の時計の時刻（PHC の時計の値や、マスタが知らせる時刻。1970-01-01 起点のナノ秒）。
 ///
 /// PTP の時刻系なら TAI（UTC より currentUtcOffset 秒進んでいる）。ARB なら起点も任意。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

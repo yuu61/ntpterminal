@@ -2,9 +2,9 @@
 
 use std::sync::mpsc::Sender;
 
-use application::port::{EventSink, PhcEventSink};
-use application::snapshot::{PhcSnapshot, SyncSnapshot};
-use domain::ptp_clock::PhcEvent;
+use application::port::{EventSink, MasterEventSink, PhcEventSink};
+use application::snapshot::{MasterSnapshot, PhcSnapshot, SyncSnapshot};
+use domain::ptp_clock::{MasterEvent, PhcEvent};
 use domain::time_sync::SyncEvent;
 
 use super::SourceSnapshot;
@@ -48,6 +48,29 @@ impl PhcEventSink for PhcSnapshotSender {
         drop(
             self.tx
                 .send(SourceSnapshot::Phc(Box::new(snapshot.clone()))),
+        );
+    }
+}
+
+/// PTP のマスタの同期スレッド: イベントが起きるたびに最新のスナップショットをチャネルへ送る。
+#[derive(Debug)]
+pub struct MasterSnapshotSender {
+    tx: Sender<SourceSnapshot>,
+}
+
+impl MasterSnapshotSender {
+    #[must_use]
+    pub const fn new(tx: Sender<SourceSnapshot>) -> Self {
+        Self { tx }
+    }
+}
+
+/// 送れなくても捨ててよい（[`SnapshotSender`] と同じ）。
+impl MasterEventSink for MasterSnapshotSender {
+    fn publish(&mut self, _event: &MasterEvent, snapshot: &MasterSnapshot) {
+        drop(
+            self.tx
+                .send(SourceSnapshot::Ptp(Box::new(snapshot.clone()))),
         );
     }
 }

@@ -1,3 +1,4 @@
+pub mod master;
 pub mod once;
 pub mod phc;
 pub mod stats;

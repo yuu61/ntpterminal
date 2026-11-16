@@ -11,5 +11,6 @@ pub mod nonce;
 mod phc;
 pub mod ptp4l;
 pub mod resolve;
+pub mod sim_ptp_master;
 pub mod sim_server;
 pub mod transport;

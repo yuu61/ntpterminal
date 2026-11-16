@@ -4,11 +4,13 @@
 //!   [`ServerReply`] にする。翻訳だけを行い、検証はしない（検証は時刻同期コンテキストの責務）
 //! - [`mib`] … SNMP コンテキストの値（メーカーの MIB）を、受信機コンテキストの状態にする
 //! - [`ptp4l`] … PTP 管理メッセージのデータセットを、PTP の時計のコンテキストの状態（`PtpStatus`）にする
+//! - [`ptp_message`] … PTP のメッセージ（Announce・Sync など）を、PTP の時計のコンテキストの入力にする
 //!
 //! 翻訳元のモデルが変わっても、影響はここで止まる。
 
 pub mod mib;
 pub mod ptp4l;
+pub mod ptp_message;
 
 use domain::packet_crafting::NtpMessage;
 use domain::time_sync::ServerReply;

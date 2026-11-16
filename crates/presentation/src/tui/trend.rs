@@ -43,6 +43,8 @@ enum Series {
     Ntp,
     /// ptp4l のマスタとの差と経路の遅延
     Ptp4l,
+    /// PTP のマスタと PC の差（マスタ − PC）と経路の遅延（片道）
+    PtpMaster,
 }
 
 /// 成功した測定値の履歴（古い順、最大 [`BARS`] 個）。
@@ -75,6 +77,14 @@ impl SampleHistory {
                 phc.status
                     .as_ref()
                     .map(|status| (status.offset_from_master, status.mean_path_delay)),
+            )
+        } else if let Some(master) = snapshot.ptp() {
+            (
+                Series::PtpMaster,
+                master.stats.samples,
+                master
+                    .last_sample
+                    .map(|sample| (sample.offset().delta(), sample.delay().delta() / 2)),
             )
         } else {
             return;
@@ -118,6 +128,10 @@ pub(super) fn trends(history: &SampleHistory) -> Vec<Trend> {
         ],
         Series::Ptp4l => vec![
             trend("マスタとの差", &firsts, format_nanos_signed),
+            trend("経路遅延", &seconds, format_nanos),
+        ],
+        Series::PtpMaster => vec![
+            trend("PC との差", &firsts, format_nanos_signed),
             trend("経路遅延", &seconds, format_nanos),
         ],
     }

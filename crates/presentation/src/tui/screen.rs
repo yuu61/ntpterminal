@@ -16,7 +16,7 @@ use domain::time_sync::SyncState;
 
 use super::big_digits::{self, BigText};
 use super::trend::{self, SampleHistory, Trend};
-use super::{SourceSnapshot, TuiConfig, TuiSource, phc, receiver, theme};
+use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, theme};
 use crate::format::{
     DisplayZone, format_clock, format_date, format_delay_ms, format_offset_ms, state_label,
     timestamping_label,
@@ -98,6 +98,16 @@ pub(super) fn build(
         } => {
             let snap = snapshot.and_then(SourceSnapshot::phc);
             (phc::status(snap), phc::rows(snap, description, ports, now))
+        }
+        TuiSource::Ptp {
+            transport,
+            timestamping,
+        } => {
+            let snap = snapshot.and_then(SourceSnapshot::ptp);
+            (
+                master::status(snap),
+                master::rows(snap, transport, timestamping, now),
+            )
         }
     };
     ScreenModel {
@@ -406,10 +416,12 @@ mod tests {
     use crate::format::display_width;
     use alloc::sync::Arc;
     use application::acl::mib::MibProfile;
-    use application::snapshot::PhcSnapshot;
+    use application::snapshot::{MasterSnapshot, PhcSnapshot};
+    use core::net::SocketAddr;
     use domain::ptp_clock::{
-        ClockIdentity, ClockQuality, LeapWarning, PhcState, PhcStats, PortState, PortStatus,
-        PtpStatus, TimeProperties, TimeSourceKind, Timescale,
+        ClockIdentity, ClockQuality, LeapWarning, MasterState, MasterStats, MasterStatus, PhcState,
+        PhcStats, PortIdentity, PortState, PortStatus, PtpStatus, TimeProperties, TimeSourceKind,
+        Timescale,
     };
     use domain::receiver::{ReceiverState, ReceiverStatus, SatelliteCounts};
     use domain::shared_kernel::LocalStamp;
@@ -948,6 +960,176 @@ mod tests {
         );
         assert_eq!(waiting.status, "ptp4l の応答待ち");
         assert!(waiting.rows.iter().any(|row| row.value == NO_VALUE));
+    }
+
+    /// マスタ 1 台に問い合わせた結果（Sync 1 秒、`Delay_Req` はマスタの最小間隔の 1 秒）のスナップショット。
+    fn master_snapshot(state: MasterState) -> MasterSnapshot {
+        let synced = synced_snapshot();
+        let sample = synced.last_sample.unwrap();
+        MasterSnapshot {
+            domain: 0,
+            state,
+            stats: MasterStats {
+                announces: 60,
+                syncs: 120,
+                requests: 120,
+                samples: 118,
+                failures: 2,
+                ignored: 0,
+            },
+            status: Some(MasterStatus {
+                master: PortIdentity {
+                    clock: ClockIdentity([0x00, 0x1B, 0x21, 0xFF, 0xFE, 0x12, 0x34, 0x56]),
+                    port: 1,
+                },
+                grandmaster: ClockIdentity([0xEC, 0x46, 0x70, 0xFF, 0xFE, 0, 0, 1]),
+                priority1: 128,
+                priority2: 128,
+                grandmaster_quality: ClockQuality {
+                    class: 6,
+                    accuracy: 0x21,
+                    variance: 0x4E5D,
+                },
+                steps_removed: 1,
+                time: TimeProperties {
+                    utc_offset: 37,
+                    utc_offset_valid: true,
+                    timescale: Timescale::Ptp,
+                    leap: LeapWarning::None,
+                    time_traceable: true,
+                    frequency_traceable: true,
+                    time_source: TimeSourceKind::Gnss,
+                },
+                announce_interval: TimeDelta::from_secs(2),
+                sync_interval: Some(TimeDelta::from_secs(1)),
+                two_step: Some(true),
+            }),
+            candidates: 1,
+            configured_interval: TimeDelta::from_millis(500),
+            request_interval: TimeDelta::from_secs(1),
+            master_min_interval: Some(TimeDelta::from_secs(1)),
+            anchor: state.shows_time().then_some(synced.anchor).flatten(),
+            last_sample: Some(sample),
+            selected_sample: Some(sample),
+            frequency: None,
+            last_success: synced.last_success,
+            last_failure: None,
+            other_domains: Vec::new(),
+            master_address: Some(SocketAddr::from(([192, 168, 10, 50], 319))),
+            receive_error: None,
+        }
+    }
+
+    fn master_config() -> TuiConfig {
+        TuiConfig {
+            title: "PTP CLOCK".into(),
+            server_label: "PTP のマスタ（ドメイン 0）".into(),
+            source: TuiSource::Ptp {
+                transport: "nic0 192.168.10.200・UDP 319/320・マルチキャスト".into(),
+                timestamping: Arc::new(TimestampingStatus::new()),
+            },
+            ..config(Some("footer"))
+        }
+    }
+
+    #[test]
+    fn master_rows_fit_with_the_big_clock_on_80x24() {
+        let snapshot = master_snapshot(MasterState::Synchronized);
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let model = build(
+            &master_config(),
+            Some(&SourceSnapshot::Ptp(Box::new(snapshot))),
+            None,
+            &SampleHistory::default(),
+            Some(shown),
+            now,
+        );
+        assert_eq!(model.status, "同期済み");
+        assert_eq!(model.status_color, theme::GOOD);
+        let value = |label: &str| {
+            model
+                .rows
+                .iter()
+                .find(|row| row.label == label)
+                .map(|row| row.value.clone())
+                .unwrap()
+        };
+        assert_eq!(value("PC との差"), "-0.978 ms（マスタ − PC）");
+        // 往復 0.423ms の片道
+        assert_eq!(value("経路遅延"), "0.211 ms");
+        assert_eq!(value("マスタ"), "001b21.fffe.123456-1（192.168.10.50）");
+        assert_eq!(value("Clock class"), "6（基準に同期）");
+        assert_eq!(
+            value("間隔"),
+            "Sync 1 秒（two-step）・Delay_Req 1 秒（マスタの最小間隔）"
+        );
+        assert_eq!(value("成功/試行"), "118/120");
+        assert_eq!(model.rows.len(), 13);
+
+        let lines = render_text(&model, 80, 24);
+        // 目視確認用: cargo test -p ntpterminal-presentation master_rows_fit -- --nocapture
+        println!(
+            "{}",
+            lines.join(
+                "
+"
+            )
+        );
+        assert!(lines.iter().any(|line| line.contains('█')));
+        assert!(
+            lines
+                .join(
+                    "
+"
+                )
+                .contains("footer")
+        );
+    }
+
+    #[test]
+    fn master_status_tells_why_the_clock_is_hidden() {
+        let mut listening = master_snapshot(MasterState::Listening);
+        listening.status = None;
+        assert_eq!(listening.anchor, None);
+        let model = build(
+            &master_config(),
+            Some(&SourceSnapshot::Ptp(Box::new(listening))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(model.clock, CLOCK_PLACEHOLDER);
+        assert_eq!(model.status, "マスタを探しています（ドメイン 0）");
+
+        let mut silent = master_snapshot(MasterState::Uncalibrated);
+        silent.last_failure = Some("Delay_Resp が届きません".to_owned());
+        let measuring = build(
+            &master_config(),
+            Some(&SourceSnapshot::Ptp(Box::new(silent))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(
+            measuring.status,
+            "マスタの時刻を測っています（Delay_Resp が届きません）"
+        );
+
+        let mut lost = master_snapshot(MasterState::Holdover);
+        lost.status = None;
+        let holdover = build(
+            &master_config(),
+            Some(&SourceSnapshot::Ptp(Box::new(lost))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(holdover.status, "自走中（マスタを見失いました）");
+        assert_eq!(holdover.status_color, theme::WARN);
     }
 
     #[test]

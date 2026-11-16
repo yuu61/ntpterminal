@@ -5,7 +5,7 @@ use core::fmt;
 use crate::shared_kernel::TimeDelta;
 
 /// 時計の識別子（clockIdentity。EUI-64）。
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct ClockIdentity(pub [u8; 8]);
 
 /// linuxptp（`pmc`）と同じ書き方: "001b21.fffe.123456"

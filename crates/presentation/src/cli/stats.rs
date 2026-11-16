@@ -48,6 +48,17 @@ impl RunningStats {
         self.m2 = delta.mul_add(value - self.mean, self.m2);
     }
 
+    /// すべての値を `factor` 倍（正の数）したときの統計。表示の単位を変えるのに使う。
+    pub(super) const fn scaled(self, factor: f64) -> Self {
+        Self {
+            count: self.count,
+            mean: self.mean * factor,
+            m2: self.m2 * factor * factor,
+            min: self.min * factor,
+            max: self.max * factor,
+        }
+    }
+
     /// 標本標準偏差。
     fn stddev(&self) -> f64 {
         if self.count < 2 {

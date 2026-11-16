@@ -1,11 +1,16 @@
-//! ptp4l が合わせる PHC の表示用の整形（状態・ナノ秒の時間差・時刻の性質）。
+//! PTP の時計（ptp4l が合わせる PHC・スレーブとして問い合わせるマスタ）の表示用の整形（状態・ナノ秒の時間差・
+//! 時刻の性質）。
 //!
 //! - PTP の時間差はナノ秒で出す。`µ`（マイクロ）は East Asian Ambiguous（端末の設定で幅が 1 にも 2 にもなる）
 //!   なので使わず、0.1 ms 以上はミリ秒で出す
-//! - 状態の文言には ptp4l のポートの状態（`SLAVE` など）を添え、ptp4l の表示と見比べられるようにする
+//! - PHC の状態の文言には ptp4l のポートの状態（`SLAVE` など）を添え、ptp4l の表示と見比べられるようにする
 
+use core::net::SocketAddr;
+
+use application::snapshot::MasterSnapshot;
 use domain::ptp_clock::{
-    ClockRole, LeapWarning, PhcState, PtpStatus, TimeProperties, TimeSourceKind, Timescale,
+    ClockRole, LeapWarning, MasterState, MasterStatus, PhcState, PtpStatus, TimeProperties,
+    TimeSourceKind, Timescale,
 };
 use domain::shared_kernel::TimeDelta;
 
@@ -182,6 +187,81 @@ pub const fn ptp_leap_key(leap: LeapWarning) -> &'static str {
         LeapWarning::Insert => "insert",
         LeapWarning::Delete => "delete",
     }
+}
+
+/// PTP のマスタの状態の文言: "同期済み"・"自走中（マスタを見失いました）" など。
+/// 測れていない理由（直近の交換の失敗）があれば添える。
+#[must_use]
+pub fn master_state_label(snapshot: &MasterSnapshot) -> String {
+    let with_failure = |base: &str| {
+        snapshot
+            .last_failure
+            .as_ref()
+            .map_or_else(|| base.to_owned(), |failure| format!("{base}（{failure}）"))
+    };
+    match snapshot.state {
+        MasterState::Listening if snapshot.receive_error.is_some() => "受信できません".to_owned(),
+        MasterState::Listening => format!("マスタを探しています（ドメイン {}）", snapshot.domain),
+        MasterState::Uncalibrated => with_failure("マスタの時刻を測っています"),
+        MasterState::Synchronized => "同期済み".to_owned(),
+        MasterState::Holdover if snapshot.status.is_none() => {
+            "自走中（マスタを見失いました）".to_owned()
+        }
+        MasterState::Holdover => with_failure("自走中"),
+    }
+}
+
+/// JSON 用の、PTP のマスタの状態名。
+#[must_use]
+pub const fn master_state_key(state: MasterState) -> &'static str {
+    match state {
+        MasterState::Listening => "listening",
+        MasterState::Uncalibrated => "uncalibrated",
+        MasterState::Synchronized => "synchronized",
+        MasterState::Holdover => "holdover",
+    }
+}
+
+/// マスタ: "001b21.fffe.123456-1（192.168.10.50）"
+#[must_use]
+pub fn master_label(status: &MasterStatus, address: Option<SocketAddr>) -> String {
+    address.map_or_else(
+        || status.master.to_string(),
+        |from| format!("{}（{}）", status.master, from.ip()),
+    )
+}
+
+/// 間隔: "1 秒" / "0.125 秒" / "2 秒"
+#[must_use]
+pub fn format_interval(delta: TimeDelta) -> String {
+    let text = format!("{:.3}", delta.as_secs_f64());
+    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
+    format!("{trimmed} 秒")
+}
+
+/// Sync と `Delay_Req` の間隔: "Sync 1 秒（two-step）・Delay_Req 1 秒"。
+/// `Delay_Req` がマスタの最小間隔のために利用者の指定より長ければ、その旨を添える。
+#[must_use]
+pub fn intervals_label(snapshot: &MasterSnapshot) -> String {
+    let status = snapshot.status;
+    let sync = status
+        .and_then(|master| master.sync_interval)
+        .map_or_else(|| "--".to_owned(), format_interval);
+    let step = match status.and_then(|master| master.two_step) {
+        Some(true) => "（two-step）",
+        Some(false) => "（one-step）",
+        None => "",
+    };
+    // マスタが最小間隔を知らせていなければ、既定のプロファイルの既定値（1 秒）とみなしている
+    let limited = match snapshot.master_min_interval {
+        _ if snapshot.request_interval <= snapshot.configured_interval => "",
+        Some(_) => "（マスタの最小間隔）",
+        None => "（既定の最小間隔）",
+    };
+    format!(
+        "Sync {sync}{step}・Delay_Req {}{limited}",
+        format_interval(snapshot.request_interval)
+    )
 }
 
 #[cfg(test)]

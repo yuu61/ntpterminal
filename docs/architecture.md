@@ -35,16 +35,18 @@ domain と application は I/O を持たないため、時刻同期の振る舞�
 | `snmp`            | SNMP v2c メッセージと BER の相互変換                                              |
 | `receiver`        | GNSS 受信機の状態をメーカーに依存しない形で表すモデル                             |
 | `ptp_management`  | PTP の管理メッセージ（ptp4l の管理用ソケットで使う）の組み立てと解析              |
-| `ptp_clock`       | ptp4l が合わせる PHC を時刻源として扱う。集約ルートは `PhcSource`。ptp4l の状態のモデルもここにある |
+| `ptp_message`     | PTP のメッセージ（Announce・Sync・`Follow_Up`・`Delay_Req`・`Delay_Resp`）の組み立てと解析 |
+| `ptp_clock`       | PTP の時計を時刻源として扱う。集約ルートは、ptp4l が合わせる PHC の `PhcSource` と、スレーブとして問い合わせるマスタの `MasterSource`。ptp4l の状態とマスタの情報のモデルもここにある |
 | `shared_kernel`   | 複数のコンテキストで共有する時刻関連の型（`NtpTimestamp`、`TimeDelta`、`PcTime` など） |
 
 `packet_crafting` は試験のために規格外のパケットも表現できるが、`time_sync` は検証済みの値しか扱わない。
 同様に、`snmp` は BER の読み書きだけを担当して値の意味には関知せず、`receiver` は SNMP について何も知らない。
-`ptp_management` と `ptp_clock` の関係も同じである。
+`ptp_management`・`ptp_message` と `ptp_clock` の関係も同じである。
 こうした性質の違うモデルが混ざらないよう、`time_sync` から `packet_crafting` を、`receiver` から `snmp` を、
-`ptp_clock` から `ptp_management` を参照することを禁じている。両者の間の変換は application 層の ACL
+`ptp_clock` から `ptp_management`・`ptp_message` を参照することを禁じている。両者の間の変換は application 層の ACL
 （[`acl.rs`](../crates/application/src/acl.rs)）が担い、メーカー固有の MIB の解釈も ACL（[`acl/mib.rs`](../crates/application/src/acl/mib.rs)）で、
-ptp4l のデータセットの解釈も ACL（[`acl/ptp4l.rs`](../crates/application/src/acl/ptp4l.rs)）で行う。
+ptp4l のデータセットの解釈も ACL（[`acl/ptp4l.rs`](../crates/application/src/acl/ptp4l.rs)）で、PTP のメッセージの解釈も
+ACL（[`acl/ptp_message.rs`](../crates/application/src/acl/ptp_message.rs)）で行う。
 `ptp_clock` は、基準点を作る処理（`time_sync` の `ClockTracker`）を `time_sync` から使う。
 
 ## 3 種類の時刻
@@ -79,7 +81,7 @@ ptp4l のデータセットの解釈も ACL（[`acl/ptp4l.rs`](../crates/applica
 応答の検証（mode、Originate Timestamp の照合、KoD、LI など）と、同期状態（未同期・同期済み・自走・拒否）の遷移は
 [`time_sync/source.rs`](../crates/domain/src/time_sync/source.rs) で定義している。
 2〜5 の処理（段差の確認・クロックフィルタ・周波数の推定・基準点）は [`time_sync/tracker.rs`](../crates/domain/src/time_sync/tracker.rs) の
-`ClockTracker` にまとめてあり、ptp4l が合わせる PHC でも同じものを使う。
+`ClockTracker` にまとめてあり、ptp4l が合わせる PHC と PTP のマスタでも同じものを使う。
 
 ### ptp4l が合わせる PHC（`--ptp4l`）
 
@@ -89,6 +91,15 @@ delay は読み取りの前後の幅、offset は PHC − PC の壁時計にな�
 （[`ptp_clock/source.rs`](../crates/domain/src/ptp_clock/source.rs)）。カーネルの時刻と同じく、PHC の読み取りは
 infrastructure の中でモノトニック時計の時刻に写してから渡す（[`phc.rs`](../crates/infrastructure/src/phc.rs)）。
 
+### PTP のマスタ（`--ptp`）
+
+PTP の 1 回の交換（マスタの Sync と、PC の `Delay_Req`）の 4 つの時刻から標本を作る。Sync の送信（t1）・受信（t2）、
+`Delay_Req` の送信（t3）・マスタの受信（t4）を、T3 = t1・T4 = t2・T1 = t3・T2 = t4 として持つ。送受信の向きが NTP と
+逆なので、`Sample::new` の順序の確認はせず、同じ式で offset と delay を求める（`Sample::from_ptp_exchange`）。
+基準点は Sync を受け取った瞬間に、マスタ時刻 t1 + 往復遅延 / 2 を対応させる。`Delay_Req` は Sync を受け取った直後に送り、
+その間の PC とマスタの時計の進み方の差が遅延に入らないようにする。マスタの選び方・`Delay_Req` の間隔・時刻の出どころの
+そろえ方は [`ptp_clock/master.rs`](../crates/domain/src/ptp_clock/master.rs) の先頭にある。
+
 ## スレッド構成（tui）
 
 | スレッド        | 処理                                                       | UI への受け渡し                       |
@@ -96,6 +107,8 @@ infrastructure の中でモノトニック時計の時刻に写してから渡�
 | メイン          | TUI のイベントループ（約 60 fps で再描画）                 | ―                                     |
 | `ntp-sync`      | `SyncService`（NTP の問い合わせを続ける）                  | `SyncSnapshot` をチャネルで送る       |
 | `ptp4l-phc`     | `PhcService`（`--ptp4l` のとき、`ntp-sync` の代わり。ptp4l の状態と PHC を読み続ける） | `PhcSnapshot` をチャネルで送る |
+| `ptp-slave`     | `PtpSlaveService`（`--ptp` のとき、`ntp-sync` の代わり。マスタのメッセージを受け取り、`Delay_Req` を送る） | `MasterSnapshot` をチャネルで送る |
+| `ptp-event`・`ptp-general` | PTP の 2 つの UDP ポートの受信（`--ptp` のとき。受け取った直後に時計を読み、`ptp-slave` にチャネルで渡す） | ― |
 | `snmp-receiver` | `ReceiverMonitor`（`--snmp-community` を指定したときのみ） | `ReceiverSnapshot` をチャネルで送る   |
 
 UI は集約に直接触れず、届いたスナップショットを描画するだけである。同期と受信機のスレッドと UI は、同じ時計インスタンスを共有する。
@@ -111,8 +124,10 @@ UI は集約に直接触れず、届いたスナップショットを描画す�
 | [`link.rs`](../crates/infrastructure/src/transport/link.rs)               | Ethernet フレームから自前で組み立て、`AF_PACKET` で送る |
 | [`kernel_ts.rs`](../crates/infrastructure/src/transport/kernel_ts.rs)     | カーネルのタイムスタンプ（`SO_TIMESTAMPING`）          |
 | [`hardware_ts.rs`](../crates/infrastructure/src/transport/hardware_ts.rs) | NIC のハードウェアタイムスタンプと、NIC の設定の変更・復元 |
+| [`ptp_udp.rs`](../crates/infrastructure/src/transport/ptp_udp.rs)         | PTP のスレーブの送受信（UDP の 319・320 番、マルチキャスト、カーネルのタイムスタンプ） |
 
-`udp.rs` 以外は Linux 専用（`cfg(target_os = "linux")`）のため、Windows 上の clippy では検査されない。
+`udp.rs` と `ptp_udp.rs` 以外は Linux 専用（`cfg(target_os = "linux")`）のため、Windows 上の clippy では検査されない
+（`ptp_udp.rs` も、カーネルのタイムスタンプとインターフェース名の部分は Linux 専用）。
 
 ptp4l が合わせる PHC の表示に使う口は transport の外にある（どちらも Linux 専用）。
 
@@ -133,6 +148,9 @@ ptp4l が合わせる PHC の表示に使う口は transport の外にある（�
 | ptp4l と PHC の同期処理  | `crates/application/tests/phc_service.rs`（模擬 ptp4l と模擬 PHC） | `cargo test --workspace`     |
 | ptp4l の管理用ソケット   | `crates/infrastructure/tests/ptp4l_socket.rs`（Linux のみ）    | `cargo test --workspace`         |
 | 本物の ptp4l と PHC      | `crates/infrastructure/tests/ptp4l_real.rs`（`#[ignore]`）     | [testing.md](testing.md#本物の-ptp4l-と-phclinuxroot) |
+| PTP のスレーブの同期処理 | `crates/application/tests/ptp_slave.rs`（偽の時計と模擬マスタ） | `cargo test --workspace`         |
+| PTP の UDP の送受信      | `crates/infrastructure/tests/ptp_loopback.rs`（疑似マスタとループバック） | `cargo test --workspace` |
+| 本物の ptp4l のマスタ    | 手動（netns で ptp4l のマスタに問い合わせる）                  | [testing.md](testing.md#ptp-のマスタに問い合わせる--ptp) |
 | カーネルのタイムスタンプ | `crates/infrastructure/tests/kernel_timestamps.rs`（Linux のみ） | `cargo test --workspace`       |
 | raw-ip・link             | `crates/infrastructure/tests/{raw_ip,link}.rs`（`#[ignore]`） | `sh scripts/privileged_tests.sh` |
 
@@ -150,6 +168,8 @@ ptp4l が合わせる PHC の表示に使う口は transport の外にある（�
 | 表示する PHC の決め方（仮想 PHC、古い linuxptp）     | [`usecase/phc_selection.rs`](../crates/application/src/usecase/phc_selection.rs) |
 | PHC の時刻源の状態と、時計を出す条件                 | [`ptp_clock/source.rs`](../crates/domain/src/ptp_clock/source.rs)          |
 | PHC の読み方（PRECISE・EXTENDED・基本の ioctl）      | [`phc.rs`](../crates/infrastructure/src/phc.rs)                            |
+| PTP のマスタの選び方・`Delay_Req` の間隔・時刻の出どころ | [`ptp_clock/master.rs`](../crates/domain/src/ptp_clock/master.rs)       |
+| PTP の送受信（マルチキャスト・ポート・受信のスレッド） | [`transport/ptp_udp.rs`](../crates/infrastructure/src/transport/ptp_udp.rs) |
 | 対応している MIB と、衛星数の意味の違い              | [`acl/mib.rs`](../crates/application/src/acl/mib.rs)                        |
 | 大きな数字の描画方法（ブロック文字を避ける理由）     | [`tui/big_digits.rs`](../crates/presentation/src/tui/big_digits.rs)         |
 | 推移のグラフ、受信機の行、配色                       | [`tui/trend.rs`](../crates/presentation/src/tui/trend.rs)、[`tui/receiver.rs`](../crates/presentation/src/tui/receiver.rs)、[`tui/theme.rs`](../crates/presentation/src/tui/theme.rs) |

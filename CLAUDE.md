@@ -34,7 +34,7 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 - 層は `domain`（I/O なし）← `application`（ユースケース・ポート）← `infrastructure` / `presentation`。
   組み立ては `src/main.rs` だけ。OS 固有のコードと `unsafe` は `infrastructure` だけに置く。
 - `domain` は時計を読まず、時刻は引数で受け取る。`time_sync` から `packet_crafting` を、`receiver` から `snmp` を、
-  `ptp_clock` から `ptp_management` を参照しない（翻訳は `application::acl`）。
+  `ptp_clock` から `ptp_management`・`ptp_message` を参照しない（翻訳は `application::acl`）。
 - 時刻の 3 種類を混ぜない: サーバ時刻 `NtpTimestamp`、モノトニック `PcTime`（delay・基準点）、
   壁時計 `LocalStamp.wall`（offset の計算だけ）。カーネルや PHC の時刻は infrastructure（transport・`phc.rs`）の中で
   モノトニックに写してから渡す。
@@ -48,4 +48,5 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 各部分の決まりごととその理由は、モジュール先頭のドキュメントコメントに書いてある
 （例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`transport/hardware_ts.rs`、`tui/big_digits.rs`、
 GNSS 受信機を SNMP で読む部分は `acl/mib.rs` と `usecase/receiver_monitor.rs`、
-ptp4l が合わせる PHC は `ptp_clock/source.rs`・`usecase/ptp4l_client.rs`・`usecase/phc_selection.rs`・`phc.rs`・`ptp4l.rs`）。
+ptp4l が合わせる PHC は `ptp_clock/source.rs`・`usecase/ptp4l_client.rs`・`usecase/phc_selection.rs`・`phc.rs`・`ptp4l.rs`、
+PTP のスレーブ（`--ptp`）は `ptp_clock/master.rs`・`usecase/ptp_slave.rs`・`transport/ptp_udp.rs`・`sim_ptp_master.rs`）。

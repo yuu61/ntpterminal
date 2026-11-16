@@ -1,6 +1,7 @@
 //! TUI: 大きい時計・情報欄・測定値の推移。
 //!
-//! 同期は別スレッドの `SyncService`（NTP）か `PhcService`（ptp4l が合わせる PHC）が行う。ここではチャネルで届く
+//! 同期は別スレッドの `SyncService`（NTP）か `PhcService`（ptp4l が合わせる PHC）か `PtpSlaveService`（PTP の
+//! マスタにスレーブとして問い合わせる）が行う。ここではチャネルで届く
 //! [`SourceSnapshot`] を受け取り、毎フレーム描き直すだけで、集約には触らない（推移のグラフ用に、届いた測定値を
 //! 表示側で貯める）。GNSS 受信機の状態も、別スレッドの `ReceiverMonitor` が [`ReceiverSnapshot`] をチャネルで送ってくる。
 //!
@@ -8,6 +9,7 @@
 
 mod app;
 mod big_digits;
+mod master;
 mod phc;
 mod receiver;
 mod screen;
@@ -17,11 +19,11 @@ mod trend;
 
 pub use app::run;
 pub use receiver::mib_label;
-pub use snapshot_sender::{PhcSnapshotSender, SnapshotSender};
+pub use snapshot_sender::{MasterSnapshotSender, PhcSnapshotSender, SnapshotSender};
 
 use alloc::sync::Arc;
 
-use application::snapshot::{PhcSnapshot, SyncSnapshot};
+use application::snapshot::{MasterSnapshot, PhcSnapshot, SyncSnapshot};
 use application::timestamping::TimestampingStatus;
 use domain::time_sync::Anchor;
 
@@ -32,6 +34,7 @@ use crate::format::DisplayZone;
 pub enum SourceSnapshot {
     Ntp(Box<SyncSnapshot>),
     Phc(Box<PhcSnapshot>),
+    Ptp(Box<MasterSnapshot>),
 }
 
 /// 中身は参照のまま渡すので、照合は参照のまま行う（`ref` は `ref_patterns` で禁止）。
@@ -47,6 +50,7 @@ impl SourceSnapshot {
         match self {
             Self::Ntp(snapshot) => snapshot.anchor,
             Self::Phc(snapshot) => snapshot.anchor,
+            Self::Ptp(snapshot) => snapshot.anchor,
         }
     }
 
@@ -54,7 +58,7 @@ impl SourceSnapshot {
     pub const fn ntp(&self) -> Option<&SyncSnapshot> {
         match self {
             Self::Ntp(snapshot) => Some(snapshot),
-            Self::Phc(_) => None,
+            Self::Phc(_) | Self::Ptp(_) => None,
         }
     }
 
@@ -62,7 +66,15 @@ impl SourceSnapshot {
     pub fn phc(&self) -> Option<&PhcSnapshot> {
         match self {
             Self::Phc(snapshot) => Some(snapshot),
-            Self::Ntp(_) => None,
+            Self::Ntp(_) | Self::Ptp(_) => None,
+        }
+    }
+
+    #[must_use]
+    pub fn ptp(&self) -> Option<&MasterSnapshot> {
+        match self {
+            Self::Ptp(snapshot) => Some(snapshot),
+            Self::Ntp(_) | Self::Phc(_) => None,
         }
     }
 }
@@ -85,6 +97,13 @@ pub enum TuiSource {
         phc: String,
         /// PHC を使う ptp4l のポートの番号とインターフェース名
         ports: Vec<(u16, String)>,
+    },
+    /// PTP のスレーブとして問い合わせるマスタ
+    Ptp {
+        /// 送受信の説明（"nic0 192.168.10.200・UDP 319/320・マルチキャスト"）
+        transport: String,
+        /// タイムスタンプの取得状況（送受信のスレッドが更新する）
+        timestamping: Arc<TimestampingStatus>,
     },
 }
 

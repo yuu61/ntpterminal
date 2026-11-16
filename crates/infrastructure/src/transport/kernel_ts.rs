@@ -110,6 +110,29 @@ impl KernelTimes {
             hardware: to_unix_nanos(&stamps.hw_raw),
         }
     }
+
+    /// カーネルのソフトウェアの時刻（Unix ナノ秒）。
+    pub(super) const fn software(self) -> Option<i128> {
+        self.software
+    }
+}
+
+/// PTP 用: ソケットに、ソフトウェアの受信時刻と送信時刻（`OPT_ID` の番号は有効にした時点から 0, 1, 2, …）を頼む。
+///
+/// NTP の [`KernelTimestamper`] は「送ってから受け取る」順で T1 と T4 の出どころをそろえるが、PTP は
+/// 「受け取って（Sync）から送る（`Delay_Req`）」順なので、出どころのそろえ方は使う側（`ptp_clock`）に任せる。
+pub(super) fn enable_software_timestamps(socket: &impl AsFd) -> io::Result<()> {
+    setsockopt(
+        socket,
+        sockopt::Timestamping,
+        &(rx_flags(false) | tx_flags(false)),
+    )?;
+    Ok(())
+}
+
+/// PTP 用: 番号 `id` の送信の、カーネルのソフトウェアの送信時刻（Unix ナノ秒）。届かなければ `None`。
+pub(super) fn software_send_time(socket: &impl AsFd, id: u32) -> Option<i128> {
+    wait_tx_timestamps(socket, id, TX_WAIT, false).software
 }
 
 /// カーネルのタイムスタンプの取得と、T1 / T4 の出どころの管理。

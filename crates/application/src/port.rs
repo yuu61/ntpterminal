@@ -1,12 +1,13 @@
 //! ポート: application 層が外側に求める機能。実装は infrastructure（本番）やテスト用の偽物。
 
+use core::net::SocketAddr;
 use core::time::Duration;
 
-use domain::ptp_clock::{PhcEvent, PhcReading};
+use domain::ptp_clock::{EventStamp, MasterEvent, PhcEvent, PhcReading};
 use domain::shared_kernel::{LocalStamp, NtpTimestamp};
 use domain::time_sync::SyncEvent;
 
-use crate::snapshot::{PhcSnapshot, SyncSnapshot};
+use crate::snapshot::{MasterSnapshot, PhcSnapshot, SyncSnapshot};
 
 pub trait ClockPort: Send + Sync {
     /// モノトニック時計と壁時計を続けて読む。
@@ -92,4 +93,48 @@ impl<P: PhcPort + ?Sized> PhcPort for Box<P> {
 /// PHC の時刻源のイベントの通知先。
 pub trait PhcEventSink {
     fn publish(&mut self, event: &PhcEvent, snapshot: &PhcSnapshot);
+}
+
+/// PTP のメッセージ 1 つ（[`PtpPort`] が受け取ったもの）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PtpInbound {
+    /// UDP のペイロード（PTP のメッセージ）
+    pub payload: Vec<u8>,
+    /// イベント用のポート（319 番）に届いたか。受け取った時刻（`received`）を測定に使うのはこちらだけ
+    pub event: bool,
+    pub received: EventStamp,
+    /// 送り手のアドレス
+    pub from: SocketAddr,
+}
+
+/// PTP の送受信（イベント用と一般用の 2 つの UDP ポート）。宛先（マルチキャストのグループかマスタ）は実装が持つ。
+pub trait PtpPort: Send {
+    /// イベント用のポートからメッセージ（`Delay_Req`）を送る。送った時刻（t3）を返す。
+    ///
+    /// # Errors
+    ///
+    /// 送信に失敗したとき。
+    fn send_event(&mut self, payload: &[u8]) -> Result<EventStamp, TransportError>;
+
+    /// 最大 `timeout` まで受信を待つ（どちらのポートに届いたものも）。時間内に届かなければ `Ok(None)`。
+    ///
+    /// # Errors
+    ///
+    /// 受信に失敗したとき（時間切れはエラーにしない）。
+    fn recv(&mut self, timeout: Duration) -> Result<Option<PtpInbound>, TransportError>;
+}
+
+impl<P: PtpPort + ?Sized> PtpPort for Box<P> {
+    fn send_event(&mut self, payload: &[u8]) -> Result<EventStamp, TransportError> {
+        (**self).send_event(payload)
+    }
+
+    fn recv(&mut self, timeout: Duration) -> Result<Option<PtpInbound>, TransportError> {
+        (**self).recv(timeout)
+    }
+}
+
+/// PTP のマスタの時刻源のイベントの通知先。
+pub trait MasterEventSink {
+    fn publish(&mut self, event: &MasterEvent, snapshot: &MasterSnapshot);
 }

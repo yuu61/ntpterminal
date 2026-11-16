@@ -23,12 +23,13 @@ use std::thread;
 use anyhow::Context as _;
 use application::acl::mib::MibProfile;
 use application::polling_policy;
-use application::port::{ClockPort, PacketPort, PhcPort};
+use application::port::{ClockPort, NonceSource as _, PacketPort, PhcPort};
 use application::snapshot::ReceiverSnapshot;
 use application::timestamping::TimestampingStatus;
 use application::usecase::{
-    PhcRequest, PhcSelectionError, PhcService, Ptp4lClient, Ptp4lClientConfig, ReceiverMonitor,
-    ReceiverMonitorConfig, SyncService, query_once, select_phc,
+    PhcRequest, PhcSelectionError, PhcService, Ptp4lClient, Ptp4lClientConfig, PtpSlaveConfig,
+    PtpSlaveService, ReceiverMonitor, ReceiverMonitorConfig, SyncService, own_port_identity,
+    query_once, select_phc,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::packet_crafting::{
@@ -41,17 +42,21 @@ use infrastructure::clock::SystemClock;
 use infrastructure::nonce::RandomNonce;
 use infrastructure::ptp4l;
 use infrastructure::resolve::resolve_server;
+use infrastructure::sim_ptp_master::{SimPtpMaster, SimPtpMasterConfig};
 use infrastructure::sim_server::{SimServer, SimServerConfig, SimSnmpAgent};
 use infrastructure::transport::{
-    self as transport_layer, LinkOptions, OpenedTransport, TimestampingMode, TransportMode,
-    TransportOptions, UdpTransport,
+    self as transport_layer, LinkOptions, OpenedTransport, PTP_EVENT_PORT, PTP_PRIMARY_GROUP,
+    PtpInterface, PtpUdp, PtpUdpOptions, TimestampingMode, TransportMode, TransportOptions,
+    UdpTransport,
 };
+use presentation::cli::master::{self, MasterStatsReporter, MasterTarget};
 use presentation::cli::once;
 use presentation::cli::phc::{self, PhcStatsReporter, PhcTarget};
 use presentation::cli::stats::StatsReporter;
 use presentation::format::{DisplayZone, timestamping_label};
 use presentation::tui::{
-    self, PhcSnapshotSender, SnapshotSender, SourceSnapshot, TuiConfig, TuiSource,
+    self, MasterSnapshotSender, PhcSnapshotSender, SnapshotSender, SourceSnapshot, TuiConfig,
+    TuiSource,
 };
 use serde::Deserialize;
 
@@ -78,8 +83,14 @@ const MIN_SNMP_INTERVAL_MS: u64 = 1000;
 /// SNMP の GET で応答を待つ上限（ミリ秒）
 const SNMP_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_SIM_SNMP_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 16100);
-/// `--ptp4l` のときの見出し
+/// `--ptp4l`・`--ptp` のときの見出し
 const DEFAULT_PTP_TITLE: &str = "PTP CLOCK";
+/// `once --ptp` で測れるまで待つ上限（ミリ秒）。マスタを選ぶのに Announce を 2 通待つ（既定のプロファイルは 2 秒ごと）
+const DEFAULT_PTP_ONCE_TIMEOUT_MS: u64 = 10_000;
+/// 疑似 PTP マスタの既定の Sync の間隔（log2。1 秒）
+const DEFAULT_SIM_PTP_LOG_SYNC: i8 = 0;
+/// 疑似 PTP マスタの Announce の間隔（log2。1 秒。マスタを選ぶのに 2 通要るので、既定のプロファイルの 2 秒より短くする）
+const SIM_PTP_LOG_ANNOUNCE: i8 = 0;
 const DEFAULT_PTP_DOMAIN: u8 = 0;
 /// tui / stats で ptp4l の応答を待つ上限（ミリ秒）。ptp4l は同じホストなので、ふつうは 1 ms もかからない
 const PTP4L_TIMEOUT_MS: u64 = 200;
@@ -118,6 +129,8 @@ enum Command {
     Stats(StatsArgs),
     /// 開発用: 疑似 NTP サーバを起動する（実機がなくても試せる）
     SimServer(SimServerArgs),
+    /// 開発用: 疑似 PTP マスタを起動する（PTP のスレーブ --ptp を、実機のマスタなしで試せる）
+    SimPtpMaster(SimPtpMasterArgs),
 }
 
 #[derive(Args)]
@@ -129,49 +142,115 @@ struct TargetArgs {
     json: bool,
 }
 
-/// ptp4l が合わせる PHC を表示する指定（tui / once / stats）。
+/// PTP の時計を表示する指定（tui / once / stats）: ptp4l が合わせる PHC（`--ptp4l`）か、
+/// PTP のスレーブとして問い合わせるマスタ（`--ptp`）。
 #[derive(Args, Clone)]
 struct PtpArgs {
     /// NTP サーバの代わりに、ptp4l（linuxptp）が合わせる NIC の時計（PHC）の時刻を表示する（Linux のみ・root が必要）
     #[arg(long)]
     ptp4l: bool,
+    /// NTP サーバの代わりに、PTP のスレーブとしてネットワークの PTP マスタに問い合わせ、その時刻を表示する（既定のプロファイル: UDP・E2E。UDP の 319/320 番を使うので、Linux では root か `CAP_NET_BIND_SERVICE` が必要）
+    #[arg(long)]
+    ptp: bool,
     /// --ptp4l のみ: ptp4l の管理用ソケット（既定: /var/run/ptp/ptp4l、なければ /var/run/ptp4l）
     #[arg(long, value_name = "PATH")]
     ptp4l_socket: Option<PathBuf>,
-    /// --ptp4l のみ: ptp4l のドメイン番号（既定: 0）
+    /// --ptp4l・--ptp のみ: PTP のドメイン番号（既定: 0）
     #[arg(long)]
     ptp_domain: Option<u8>,
     /// --ptp4l のみ: 表示する PHC（/dev/ptpN か、ptp4l のポートのインターフェース名）。ptp4l が複数の PHC を使うときに指定する
     #[arg(long, value_name = "PHC", value_parser = parse_phc)]
     phc: Option<PhcRequest>,
+    /// --ptp のみ: 使うインターフェース（名前か IPv4 アドレス。名前は Linux のみ。既定: マスタかマルチキャストのグループへの経路で決める）
+    #[arg(long, value_name = "INTERFACE")]
+    ptp_interface: Option<String>,
+    /// --ptp のみ: マスタの IPv4 アドレス（ポートを付けてもよい。既定のポートは --ptp-port）。指定すると `Delay_Req` をユニキャストで送る（既定: マルチキャスト）
+    #[arg(long, value_name = "ADDRESS", value_parser = parse_ptp_address)]
+    ptp_master: Option<SocketAddr>,
+    /// --ptp のみ: イベント用の UDP ポート（一般用はその次の番号。既定: 319）
+    #[arg(long, value_name = "PORT")]
+    ptp_port: Option<u16>,
 }
 
 impl PtpArgs {
-    /// 一緒に使えない指定をエラーにする（黙って無視しない）。`--ptp4l` のときは NTP サーバと `ntp_only`
-    /// （NTP サーバに問い合わせるときだけの指定。名前と、指定したか）を、そうでないときは `--ptp4l` だけの指定を確かめる。
+    /// 一緒に使えない指定をエラーにする（黙って無視しない）。`--ptp4l`・`--ptp` のときは NTP サーバと `ntp_only`
+    /// （NTP サーバに問い合わせるときだけの指定。名前と、指定したか。`--ptp` では `--timestamping` は使える）と、
+    /// もう一方のモードだけの指定を、どちらでもないときは両方のモードだけの指定を確かめる。
     fn check(&self, server: Option<&str>, ntp_only: &[(&'static str, bool)]) -> anyhow::Result<()> {
-        if self.ptp4l {
+        anyhow::ensure!(
+            !(self.ptp4l && self.ptp),
+            "--ptp4l と --ptp は一緒に指定できません"
+        );
+        let ptp4l_only = [
+            ("--ptp4l-socket", self.ptp4l_socket.is_some()),
+            ("--phc", self.phc.is_some()),
+        ];
+        let master_only = [
+            ("--ptp-interface", self.ptp_interface.is_some()),
+            ("--ptp-master", self.ptp_master.is_some()),
+            ("--ptp-port", self.ptp_port.is_some()),
+        ];
+        let first = |items: &[(&'static str, bool)]| {
+            items
+                .iter()
+                .find(|&&(_, given)| given)
+                .map(|&(name, _)| name)
+        };
+        if self.ptp4l || self.ptp {
+            let mode = if self.ptp4l { "--ptp4l" } else { "--ptp" };
             anyhow::ensure!(
                 server.is_none(),
-                "--ptp4l と NTP サーバ（引数か、設定ファイルの server）は一緒に指定できません"
+                "{mode} と NTP サーバ（引数か、設定ファイルの server）は一緒に指定できません"
             );
-            if let Some(&(name, _)) = ntp_only.iter().find(|&&(_, given)| given) {
+            let not_for_mode = ntp_only
+                .iter()
+                .filter(|&&(name, _)| !(self.ptp && name == "--timestamping"))
+                .find(|&&(_, given)| given);
+            if let Some(&(name, _)) = not_for_mode {
                 anyhow::bail!(
-                    "{name} は NTP サーバに問い合わせるときの指定で、--ptp4l とは一緒に使えません（設定ファイルの値も含む）"
+                    "{name} は NTP サーバに問い合わせるときの指定で、{mode} とは一緒に使えません（設定ファイルの値も含む）"
                 );
+            }
+            let other = if self.ptp4l {
+                first(&master_only).map(|name| (name, "--ptp"))
+            } else {
+                first(&ptp4l_only).map(|name| (name, "--ptp4l"))
+            };
+            if let Some((name, needs)) = other {
+                anyhow::bail!("{name} は {needs} と一緒に指定してください");
             }
             return Ok(());
         }
-        let ptp_only = [
-            ("--ptp4l-socket", self.ptp4l_socket.is_some()),
-            ("--ptp-domain", self.ptp_domain.is_some()),
-            ("--phc", self.phc.is_some()),
-        ];
-        if let Some(&(name, _)) = ptp_only.iter().find(|&&(_, given)| given) {
+        if let Some(name) = first(&ptp4l_only) {
             anyhow::bail!("{name} は --ptp4l と一緒に指定してください");
         }
+        if let Some(name) = first(&master_only) {
+            anyhow::bail!("{name} は --ptp と一緒に指定してください");
+        }
+        anyhow::ensure!(
+            self.ptp_domain.is_none(),
+            "--ptp-domain は --ptp4l か --ptp と一緒に指定してください"
+        );
         Ok(())
     }
+}
+
+/// `--ptp-master`・`sim-ptp-master --to` の値: IPv4 アドレス（ポートを付けてもよい）。ポートを省くと 0
+/// （それぞれの既定のポートを使う）。
+fn parse_ptp_address(text: &str) -> Result<SocketAddr, String> {
+    let trimmed = text.trim();
+    let address = trimmed
+        .parse::<SocketAddr>()
+        .or_else(|_| trimmed.parse::<IpAddr>().map(|ip| SocketAddr::new(ip, 0)))
+        .map_err(|error| {
+            format!(
+                "IPv4 アドレスで指定してください（:ポート を付けてもよい）: {trimmed}（{error}）"
+            )
+        })?;
+    if address.is_ipv6() {
+        return Err(format!("PTP は IPv4 だけに対応しています: {trimmed}"));
+    }
+    Ok(address)
 }
 
 /// `--phc` の値: `/dev/ptpN` なら PHC の番号、それ以外は ptp4l のポートのインターフェース名。
@@ -625,6 +704,31 @@ struct SimServerArgs {
     snmp_bind: Option<SocketAddr>,
 }
 
+#[derive(Args, Clone, Copy)]
+struct SimPtpMasterArgs {
+    /// 待ち受けるイベント用の UDP ポート（一般用はその次の番号。既定: 319）
+    #[arg(long)]
+    port: Option<u16>,
+    /// 送り先の IPv4 アドレス（ポートを付けてもよい。既定: マルチキャストの 224.0.1.129、ポートは --port と同じ）
+    #[arg(long, value_parser = parse_ptp_address)]
+    to: Option<SocketAddr>,
+    /// マルチキャストで送り、グループに参加するインターフェースの IPv4 アドレス。ユニキャストでは、このアドレスで待ち受ける（既定: 全アドレスで待ち、経路で送る）
+    #[arg(long)]
+    interface: Option<Ipv4Addr>,
+    /// ドメイン番号（既定: 0）
+    #[arg(long)]
+    domain: Option<u8>,
+    /// PC の時計に対するマスタの時刻のずれ（ミリ秒。負も可。既定: 0）
+    #[arg(long, allow_hyphen_values = true)]
+    offset_ms: Option<f64>,
+    /// one-step のマスタにする（既定: two-step。送った時刻を `Follow_Up` で知らせる）
+    #[arg(long)]
+    one_step: bool,
+    /// Sync の間隔の log2（秒。-3 なら 0.125 秒。既定: 0 = 1 秒）
+    #[arg(long, allow_hyphen_values = true, value_parser = clap::value_parser!(i8).range(-7..=4))]
+    log_sync_interval: Option<i8>,
+}
+
 fn main() -> ExitCode {
     match run(Cli::parse()) {
         Ok(code) => code,
@@ -646,6 +750,7 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
         Command::Once(args) => run_once(&args),
         Command::Stats(args) => run_stats(&args),
         Command::SimServer(args) => run_sim_server(&args),
+        Command::SimPtpMaster(args) => run_sim_ptp_master(&args),
     }
 }
 
@@ -679,6 +784,8 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     let stop = Arc::new(AtomicBool::new(false));
     let started = if args.ptp.ptp4l {
         start_phc(args, &clock, interval, tx, &stop)?
+    } else if args.ptp.ptp {
+        start_ptp(args, &clock, interval, tx, &stop)?
     } else {
         start_ntp(args, &clock, interval, tx, &stop)?
     };
@@ -810,6 +917,80 @@ fn start_phc(
     })
 }
 
+/// PTP のスレーブとしてマスタへの問い合わせを別スレッドで始める。
+fn start_ptp(
+    args: &TuiArgs,
+    clock: &Arc<dyn ClockPort>,
+    interval: Duration,
+    tx: mpsc::Sender<SourceSnapshot>,
+    stop: &Arc<AtomicBool>,
+) -> anyhow::Result<StartedSource> {
+    let (mut service, target, timestamping) =
+        open_master(&args.ptp, &args.transport, clock, interval)?;
+    let sync_thread = thread::Builder::new()
+        .name("ptp-slave".into())
+        .spawn({
+            let thread_stop = Arc::clone(stop);
+            move || service.run_until(&mut MasterSnapshotSender::new(tx), None, &thread_stop)
+        })
+        .context("同期スレッドを起動できません")?;
+    Ok(StartedSource {
+        label: target.label(),
+        source: TuiSource::Ptp {
+            transport: target.transport,
+            timestamping,
+        },
+        default_title: DEFAULT_PTP_TITLE,
+        sync_thread,
+        receiver: None,
+    })
+}
+
+/// PTP の送受信の口を開き、スレーブの同期サービスを作る。`interval` は `Delay_Req` の間隔の下限（利用者の指定）。
+fn open_master(
+    ptp: &PtpArgs,
+    transport: &TransportArgs,
+    clock: &Arc<dyn ClockPort>,
+    interval: Duration,
+) -> anyhow::Result<(
+    PtpSlaveService<PtpUdp>,
+    MasterTarget,
+    Arc<TimestampingStatus>,
+)> {
+    let timestamping = Arc::new(TimestampingStatus::new());
+    let opened = transport_layer::open_ptp(
+        &PtpUdpOptions {
+            interface: ptp.ptp_interface.as_deref().map(PtpInterface::parse),
+            event_port: ptp.ptp_port.unwrap_or(PTP_EVENT_PORT),
+            master: ptp.ptp_master,
+            timestamping: transport.options().timestamping,
+        },
+        Arc::clone(clock),
+        Arc::clone(&timestamping),
+    )
+    .context(
+        "PTP の送受信の準備ができません（ポートは --ptp-port、インターフェースは --ptp-interface で指定できます）",
+    )?;
+    let domain = ptp.ptp_domain.unwrap_or(DEFAULT_PTP_DOMAIN);
+    let service = PtpSlaveService::new(
+        PtpSlaveConfig {
+            domain,
+            own: own_port_identity(RandomNonce::new().next_nonce().to_bits()),
+            request_interval: TimeDelta::from_std(interval),
+            unicast: opened.unicast,
+            precise_source: opened.precise_source,
+        },
+        opened.port,
+        Arc::clone(clock),
+        Arc::clone(&timestamping),
+    );
+    let target = MasterTarget {
+        domain,
+        transport: opened.description,
+    };
+    Ok((service, target, timestamping))
+}
+
 /// ptp4l が合わせる PHC の同期サービス（PHC と ptp4l の管理用ソケットは、どちらも実行時に開く）。
 type Ptp4lPhcService = PhcService<Box<dyn PhcPort>, Box<dyn PacketPort>>;
 
@@ -906,6 +1087,9 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
         .check(args.target.server.as_deref(), &args.transport.given())?;
     if args.ptp.ptp4l {
         return run_once_phc(args);
+    }
+    if args.ptp.ptp {
+        return run_once_ptp(args);
     }
     let zone = args.zone.zone();
     let server = resolve(required_server(args.target.server.as_deref())?)?;
@@ -1014,12 +1198,62 @@ fn run_once_phc(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// `once --ptp`: マスタを選び、最初の交換で測る（Announce を 2 通待つので数秒かかる）。測れなければ終了コード 1。
+fn run_once_ptp(args: &OnceArgs) -> anyhow::Result<ExitCode> {
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let timeout = Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_PTP_ONCE_TIMEOUT_MS));
+    let (mut service, target, timestamping) = open_master(
+        &args.ptp,
+        &args.transport,
+        &clock,
+        Duration::from_millis(DEFAULT_INTERVAL_MS),
+    )?;
+    match service.run_once(timeout) {
+        Ok(snapshot) => {
+            let stamps = timestamping_label(&timestamping.counts());
+            if args.target.json {
+                writeln!(
+                    io::stdout().lock(),
+                    "{}",
+                    master::render_once_json(&target, &snapshot, stamps)
+                )?;
+            } else {
+                write!(
+                    io::stdout().lock(),
+                    "{}",
+                    master::render_once_text(&target, &snapshot, stamps, &args.zone.zone())
+                )?;
+            }
+            Ok(if snapshot.state.shows_time() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Err(error) if args.target.json => {
+            writeln!(
+                io::stdout().lock(),
+                "{}",
+                master::render_once_error_json(&target, &error.to_string())
+            )?;
+            Ok(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            writeln!(io::stderr().lock(), "{}: {error}", target.label())?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     let mut ntp_only = args.transport.given();
     ntp_only.push(("--allow-fast-poll", args.allow_fast_poll));
     args.ptp.check(args.target.server.as_deref(), &ntp_only)?;
     if args.ptp.ptp4l {
         return run_stats_phc(args);
+    }
+    if args.ptp.ptp {
+        return run_stats_ptp(args);
     }
     let server = resolve(required_server(args.target.server.as_deref())?)?;
     let interval = polling_interval(args.interval_ms);
@@ -1079,6 +1313,33 @@ fn run_stats_phc(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     Ok(ExitCode::SUCCESS)
 }
 
+/// `stats --ptp`: マスタに問い合わせ続け、交換ごとの結果と統計を出す。`--count` は交換の回数
+/// （マスタが見つからなければ 30 秒で諦め、終了コード 1）。
+fn run_stats_ptp(args: &StatsArgs) -> anyhow::Result<ExitCode> {
+    let interval = polling_interval(args.interval_ms);
+    let count = args.count.unwrap_or(DEFAULT_COUNT);
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let (mut service, target, timestamping) =
+        open_master(&args.ptp, &args.transport, &clock, interval)?;
+    let mut reporter = MasterStatsReporter::new(io::stdout().lock(), target, args.target.json)
+        .with_timestamping(timestamping);
+    if count == 0 {
+        reporter = reporter.with_periodic_summary(20);
+    }
+    reporter.write_header();
+    service.run_until(
+        &mut reporter,
+        (count > 0).then_some(count),
+        &Arc::new(AtomicBool::new(false)),
+    );
+    reporter.write_summary();
+    Ok(if service.source().stats().samples > 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
+}
+
 fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
     let bind = args.bind.unwrap_or(DEFAULT_SIM_BIND);
     let offset_ms = args.offset_ms.unwrap_or(DEFAULT_SIM_OFFSET_MS);
@@ -1120,6 +1381,50 @@ fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
     };
     server.join();
     drop(agent);
+    Ok(ExitCode::SUCCESS)
+}
+
+fn run_sim_ptp_master(args: &SimPtpMasterArgs) -> anyhow::Result<ExitCode> {
+    let event_port = args.port.unwrap_or(PTP_EVENT_PORT);
+    let destination = args.to.map_or_else(
+        || SocketAddr::new(IpAddr::V4(PTP_PRIMARY_GROUP), event_port),
+        |to| {
+            if to.port() == 0 {
+                SocketAddr::new(to.ip(), event_port)
+            } else {
+                to
+            }
+        },
+    );
+    let offset_ms = args.offset_ms.unwrap_or(DEFAULT_SIM_OFFSET_MS);
+    let domain = args.domain.unwrap_or(DEFAULT_PTP_DOMAIN);
+    let log_sync_interval = args.log_sync_interval.unwrap_or(DEFAULT_SIM_PTP_LOG_SYNC);
+    let master = SimPtpMaster::spawn(SimPtpMasterConfig {
+        event_port,
+        destination,
+        interface: args.interface,
+        domain,
+        offset: TimeDelta::from_millis_f64(offset_ms),
+        two_step: !args.one_step,
+        log_sync_interval,
+        log_announce_interval: SIM_PTP_LOG_ANNOUNCE,
+    })
+    .with_context(|| {
+        format!(
+            "UDP の {event_port} 番で待ち受けできません（1024 未満のポートは root か CAP_NET_BIND_SERVICE が要ります。--port で変えられます）"
+        )
+    })?;
+    writeln!(
+        io::stderr().lock(),
+        "疑似 PTP マスタを UDP {event_port}/{} で起動しました（送り先 {destination}、ドメイン {domain}、offset {offset_ms:+.3} ms、{}、Sync 2^{log_sync_interval} 秒ごと）。Ctrl+C で終了します。",
+        event_port.saturating_add(1),
+        if args.one_step {
+            "one-step"
+        } else {
+            "two-step"
+        },
+    )?;
+    master.join();
     Ok(ExitCode::SUCCESS)
 }
 
