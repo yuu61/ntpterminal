@@ -1,6 +1,8 @@
 # ntpterminal
 
 NTP サーバに 1 秒未満の間隔で問い合わせ、サーバ時刻を大きな数字で表示する TUI（Rust）。Linux 推奨、Windows でも動く。
+使い方は `docs/usage.md`、全体の構成（レイヤー・時刻の扱い・スレッド）は `docs/architecture.md` にある。
+使い方や構成を変えたら、これらも更新する。
 
 ## コマンド
 
@@ -24,7 +26,8 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 
 オプションは TOML の設定ファイルにも書ける（`--config <PATH>`、省略時はカレントディレクトリの `config.toml`。
 キーは長いオプションと同じ名前。決まりは `src/config.rs` の先頭）。スクリプトからは `--config /dev/null` で手元の設定を読ませない。
-オプションを足したら `src/config.rs` と全項目の例 `docs/config.example.toml` にも足す（足し忘れはテストで落ちる）。
+オプションを足したら `src/config.rs`、全項目の例 `docs/config.example.toml`、項目一覧 `docs/configuration.md` にも足す
+（足し忘れはテストで落ちる）。既定値を変えたときは `docs/configuration.md` の表も直す。
 
 ## 守ること
 

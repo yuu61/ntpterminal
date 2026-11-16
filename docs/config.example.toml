@@ -1,4 +1,5 @@
 # ntpterminal の設定ファイルの例（全項目）。使う行のコメントを外して使う。
+# 各項目の値の範囲と既定値は docs/configuration.md を参照。
 #
 #   ntpterminal tui                                     # カレントディレクトリの config.toml を読む（なければ読まない）
 #   ntpterminal --config booth.toml tui                 # ほかのファイルを読む
