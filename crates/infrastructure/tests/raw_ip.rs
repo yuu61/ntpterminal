@@ -180,3 +180,41 @@ fn ignores_unrelated_udp_traffic_while_waiting() {
     noise_thread.join().unwrap();
     assert!(result.is_ok(), "{result:?}");
 }
+
+#[test]
+#[ignore = "raw ソケットが必要（root か unshare -rn の中で --ignored を付けて実行する）"]
+fn raw_ip_uses_kernel_time_for_both_send_and_receive() {
+    use application::timestamping::TimestampingStatus;
+    use infrastructure::transport::{self, TimestampingMode, TransportMode, TransportOptions};
+
+    let server =
+        SimServer::spawn("127.0.0.1:0".parse().unwrap(), SimServerConfig::default()).unwrap();
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let status = Arc::new(TimestampingStatus::new());
+    let port = transport::open(
+        TransportMode::RawIp,
+        server.local_addr(),
+        TransportOptions {
+            timestamping: TimestampingMode::Kernel,
+            ..TransportOptions::default()
+        },
+        Arc::clone(&clock),
+        Arc::clone(&status),
+    )
+    .unwrap();
+    query_once(
+        port,
+        RandomNonce::new(),
+        clock,
+        RequestTemplate::default(),
+        Duration::from_secs(2),
+    )
+    .unwrap();
+
+    let counts = status.counts();
+    println!("raw-ip + カーネル: {counts:?}");
+    assert!(counts.kernel_enabled);
+    // Linux では IPPROTO_RAW の送信でも送信時刻が取れることを確認済み（WSL2 のカーネル 6.18）
+    assert_eq!(counts.kernel_samples, 1, "{counts:?}");
+    assert_eq!(counts.tx_misses, 0, "{counts:?}");
+}

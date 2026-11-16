@@ -4,13 +4,18 @@ use std::io::Write;
 use std::net::SocketAddr;
 use std::time::Duration;
 
+use std::sync::Arc;
+
 use application::port::EventSink;
 use application::snapshot::SyncSnapshot;
+use application::timestamping::TimestampingStatus;
 use domain::time_sync::SyncEvent;
 use serde_json::json;
 
 use super::render_rows;
-use crate::format::{format_delay_ms, format_offset_ms, state_key, state_label};
+use crate::format::{
+    format_delay_ms, format_offset_ms, state_key, state_label, timestamping_breakdown,
+};
 
 /// 平均・標準偏差を逐次計算する（Welford 法）。
 #[derive(Clone, Copy, Debug, Default)]
@@ -56,6 +61,7 @@ pub struct StatsReporter<W: Write> {
     delay_ms: RunningStats,
     last: Option<SyncSnapshot>,
     summary_every: Option<u64>,
+    timestamping: Option<Arc<TimestampingStatus>>,
 }
 
 impl<W: Write> StatsReporter<W> {
@@ -68,7 +74,14 @@ impl<W: Write> StatsReporter<W> {
             delay_ms: RunningStats::default(),
             last: None,
             summary_every: None,
+            timestamping: None,
         }
+    }
+
+    /// 集計にタイムスタンプの内訳を含める。
+    pub fn with_timestamping(mut self, status: Arc<TimestampingStatus>) -> Self {
+        self.timestamping = Some(status);
+        self
     }
 
     /// `every` 回の問い合わせごとに途中集計を出す（回数無制限で動かすとき用）。
@@ -126,6 +139,9 @@ impl<W: Write> StatsReporter<W> {
             ),
             ("状態", state_label(snapshot.state).to_string()),
         ];
+        if let Some(status) = &self.timestamping {
+            rows.push(("タイムスタンプ", timestamping_breakdown(&status.counts())));
+        }
         if self.offset_ms.count > 0 {
             rows.push(("offset [ms]", describe(&self.offset_ms, true)));
             rows.push(("delay [ms]", describe(&self.delay_ms, false)));
@@ -161,6 +177,15 @@ impl<W: Write> StatsReporter<W> {
             "state": self.last.map(|snapshot| state_key(snapshot.state)),
             "offset_ms": stats_json(&self.offset_ms),
             "delay_ms": stats_json(&self.delay_ms),
+            "timestamping": self.timestamping.as_ref().map(|status| {
+                let counts = status.counts();
+                json!({
+                    "kernel_enabled": counts.kernel_enabled,
+                    "kernel_samples": counts.kernel_samples,
+                    "user_samples": counts.user_samples,
+                    "tx_misses": counts.tx_misses,
+                })
+            }),
             "selected": selected.map(|sample| json!({
                 "offset_ms": sample.offset().delta().as_millis_f64(),
                 "delay_ms": sample.delay().delta().as_millis_f64(),

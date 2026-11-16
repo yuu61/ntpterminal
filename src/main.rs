@@ -14,6 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, bail};
 use application::polling_policy;
 use application::port::{ClockPort, PacketPort};
+use application::timestamping::TimestampingStatus;
 use application::usecase::{SyncService, query_once};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::packet_crafting::{HeaderTemplate, Ipv4Spec, RequestTemplate, UdpChecksum};
@@ -23,10 +24,12 @@ use infrastructure::clock::SystemClock;
 use infrastructure::nonce::RandomNonce;
 use infrastructure::resolve::resolve_server;
 use infrastructure::sim_server::{SimServer, SimServerConfig};
-use infrastructure::transport::{self as transport_layer, TransportMode, TransportOptions};
+use infrastructure::transport::{
+    self as transport_layer, TimestampingMode, TransportMode, TransportOptions,
+};
 use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
-use presentation::format::DisplayZone;
+use presentation::format::{DisplayZone, timestamping_label};
 use presentation::tui::{self, SnapshotSender, TuiConfig};
 
 #[derive(Parser)]
@@ -80,11 +83,25 @@ enum ModeArg {
     RawIp,
 }
 
+/// タイムスタンプの取り方（CLI での指定）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+enum TimestampingArg {
+    /// 使えればカーネル、使えなければユーザ空間
+    Auto,
+    /// カーネルのタイムスタンプ（Linux のみ。使えなければエラー）
+    Kernel,
+    /// ユーザ空間で時計を読む
+    User,
+}
+
 #[derive(Args)]
 struct TransportArgs {
     /// 送信方式
     #[arg(long = "transport", value_enum, default_value_t = ModeArg::Udp)]
     mode: ModeArg,
+    /// タイムスタンプの取り方
+    #[arg(long, value_enum, default_value_t = TimestampingArg::Auto)]
+    timestamping: TimestampingArg,
     /// 送信元ポート（省略時は OS に任せる）
     #[arg(long)]
     source_port: Option<u16>,
@@ -138,6 +155,11 @@ impl TransportArgs {
         TransportOptions {
             source_port: self.source_port.unwrap_or(0),
             headers,
+            timestamping: match self.timestamping {
+                TimestampingArg::Auto => TimestampingMode::Auto,
+                TimestampingArg::Kernel => TimestampingMode::Kernel,
+                TimestampingArg::User => TimestampingMode::User,
+            },
         }
     }
 
@@ -145,8 +167,9 @@ impl TransportArgs {
         &self,
         server: SocketAddr,
         clock: Arc<dyn ClockPort>,
+        status: Arc<TimestampingStatus>,
     ) -> anyhow::Result<Box<dyn PacketPort>> {
-        transport_layer::open(self.mode(), server, self.options(), clock)
+        transport_layer::open(self.mode(), server, self.options(), clock, status)
             .context("送受信の準備ができません")
     }
 }
@@ -267,7 +290,10 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     // 同期スレッドと UI は必ず同じ時計インスタンスを使う。
     // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport = args.transport.open(server, Arc::clone(&clock))?;
+    let timestamping = Arc::new(TimestampingStatus::new());
+    let transport = args
+        .transport
+        .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,
@@ -293,6 +319,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         footer: args.footer.clone(),
         zone,
         transport: args.transport.mode().label().to_string(),
+        timestamping,
     };
     let result = tui::run(&config, clock, rx);
 
@@ -306,7 +333,10 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     let zone = args.zone.zone()?;
     let server = resolve(&args.target.server)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport = args.transport.open(server, Arc::clone(&clock))?;
+    let timestamping = Arc::new(TimestampingStatus::new());
+    let transport = args
+        .transport
+        .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
 
     let result = query_once(
         transport,
@@ -319,14 +349,25 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
         Ok(outcome) if args.target.json => {
             println!(
                 "{}",
-                once::render_json(server, args.transport.mode().label(), &outcome)
+                once::render_json(
+                    server,
+                    args.transport.mode().label(),
+                    timestamping_label(&timestamping.counts()),
+                    &outcome,
+                )
             );
             Ok(ExitCode::SUCCESS)
         }
         Ok(outcome) => {
             print!(
                 "{}",
-                once::render_text(server, args.transport.mode().label(), &outcome, &zone)
+                once::render_text(
+                    server,
+                    args.transport.mode().label(),
+                    timestamping_label(&timestamping.counts()),
+                    &outcome,
+                    &zone,
+                )
             );
             Ok(ExitCode::SUCCESS)
         }
@@ -348,7 +389,10 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
         polling_policy::check_interval(server.ip(), interval)?;
     }
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
-    let transport = args.transport.open(server, Arc::clone(&clock))?;
+    let timestamping = Arc::new(TimestampingStatus::new());
+    let transport = args
+        .transport
+        .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,
@@ -357,7 +401,8 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
         RequestTemplate::default(),
     );
 
-    let mut reporter = StatsReporter::new(io::stdout().lock(), server, args.target.json);
+    let mut reporter = StatsReporter::new(io::stdout().lock(), server, args.target.json)
+        .with_timestamping(Arc::clone(&timestamping));
     if args.count == 0 {
         reporter = reporter.with_periodic_summary(20);
     }

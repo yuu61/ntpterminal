@@ -6,7 +6,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
+#[cfg(target_os = "linux")]
+use application::timestamping::TimestampingStatus;
 use domain::shared_kernel::LocalStamp;
+
+#[cfg(target_os = "linux")]
+use super::kernel_ts::{KernelTimestamper, recv_with_timestamp};
 
 /// 受信バッファの大きさ。拡張フィールド付きの応答も入る。
 const RECV_BUFFER_LEN: usize = 2048;
@@ -14,11 +19,14 @@ const RECV_BUFFER_LEN: usize = 2048;
 /// 1 台のサーバに `connect` した UDP ソケット。
 ///
 /// `connect` しているので、OS がそのサーバ以外からのデータグラムを捨ててくれる。
-/// 時刻はユーザ空間で、送信の直前（T1）と受信の直後（T4）に読む。
+/// 時刻は既定ではユーザ空間で、送信の直前（T1）と受信の直後（T4）に読む。
+/// Linux ではカーネルのタイムスタンプも使える（[`Self::enable_kernel_timestamps`]）。
 pub struct UdpTransport {
     socket: UdpSocket,
     clock: Arc<dyn ClockPort>,
     buf: Vec<u8>,
+    #[cfg(target_os = "linux")]
+    kernel: Option<KernelTimestamper>,
 }
 
 impl UdpTransport {
@@ -38,7 +46,20 @@ impl UdpTransport {
             socket,
             clock,
             buf: vec![0; RECV_BUFFER_LEN],
+            #[cfg(target_os = "linux")]
+            kernel: None,
         })
+    }
+
+    /// カーネルのタイムスタンプ（SO_TIMESTAMPING）を使う。権限は不要。
+    #[cfg(target_os = "linux")]
+    pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
+        self.kernel = Some(KernelTimestamper::enable(
+            &self.socket,
+            &self.socket,
+            status,
+        )?);
+        Ok(())
     }
 
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
@@ -50,6 +71,10 @@ impl PacketPort for UdpTransport {
     fn send(&mut self, payload: &[u8]) -> Result<LocalStamp, TransportError> {
         let sent = self.clock.now();
         self.socket.send(payload).map_err(to_transport_error)?;
+        #[cfg(target_os = "linux")]
+        if let Some(kernel) = &mut self.kernel {
+            return Ok(kernel.after_send(&self.socket, self.clock.as_ref(), sent));
+        }
         Ok(sent)
     }
 
@@ -59,6 +84,19 @@ impl PacketPort for UdpTransport {
         self.socket
             .set_read_timeout(Some(timeout))
             .map_err(to_transport_error)?;
+        #[cfg(target_os = "linux")]
+        if let Some(kernel) = &self.kernel {
+            return match recv_with_timestamp(&self.socket, &mut self.buf) {
+                Ok((len, kernel_time)) => {
+                    let received = kernel.choose_received(kernel_time, self.clock.now());
+                    Ok(Some(Inbound {
+                        payload: self.buf[..len].to_vec(),
+                        received,
+                    }))
+                }
+                Err(error) => recv_error(error),
+            };
+        }
         match self.socket.recv(&mut self.buf) {
             Ok(len) => {
                 let received = self.clock.now();
@@ -67,17 +105,20 @@ impl PacketPort for UdpTransport {
                     received,
                 }))
             }
-            // タイムアウトは Unix では WouldBlock、Windows では TimedOut になる
-            Err(error)
-                if matches!(
-                    error.kind(),
-                    ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
-                ) =>
-            {
-                Ok(None)
-            }
-            Err(error) => Err(to_transport_error(error)),
+            Err(error) => recv_error(error),
         }
+    }
+}
+
+/// 受信のエラー。タイムアウトは Unix では WouldBlock、Windows では TimedOut になる。
+fn recv_error(error: io::Error) -> Result<Option<Inbound>, TransportError> {
+    if matches!(
+        error.kind(),
+        ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
+    ) {
+        Ok(None)
+    } else {
+        Err(to_transport_error(error))
     }
 }
 

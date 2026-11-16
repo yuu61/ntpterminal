@@ -17,6 +17,7 @@ application.workspace = true
 # raw-ip モード（Linux のみ）
 [target.'cfg(target_os = "linux")'.dependencies]
 socket2.workspace = true
+nix.workspace = true
 
 [lints]
 workspace = true

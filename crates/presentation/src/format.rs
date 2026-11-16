@@ -1,5 +1,6 @@
 //! 表示用の整形（日時・時間差・状態・文字幅）。
 
+use application::timestamping::TimestampingCounts;
 use domain::shared_kernel::{NtpTimestamp, TimeDelta};
 use domain::time_sync::{LeapIndicator, SyncState};
 
@@ -213,6 +214,31 @@ pub fn leap_key(leap: LeapIndicator) -> &'static str {
         LeapIndicator::InsertSecond => "insert",
         LeapIndicator::DeleteSecond => "delete",
         LeapIndicator::Unsynchronized => "unsynchronized",
+    }
+}
+
+/// タイムスタンプの出どころ（直近の受信）。カーネルの時刻が取れていないことを隠さない。
+pub fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
+    if !counts.kernel_enabled {
+        "ユーザ空間"
+    } else if counts.kernel_samples == 0 && counts.user_samples == 0 {
+        "カーネル（応答待ち）"
+    } else if counts.last_was_kernel {
+        "カーネル"
+    } else {
+        "ユーザ空間（カーネルの時刻が取れない）"
+    }
+}
+
+/// タイムスタンプの内訳: "カーネル 12 回 / ユーザ空間 0 回（送信時刻なし 0 回）"
+pub fn timestamping_breakdown(counts: &TimestampingCounts) -> String {
+    if counts.kernel_enabled {
+        format!(
+            "カーネル {} 回 / ユーザ空間 {} 回（送信時刻なし {} 回）",
+            counts.kernel_samples, counts.user_samples, counts.tx_misses
+        )
+    } else {
+        "ユーザ空間".to_string()
     }
 }
 

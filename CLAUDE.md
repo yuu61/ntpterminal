@@ -23,6 +23,9 @@ cargo run -- stats 127.0.0.1:12300
 sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
 #   ヘッダ指定: --ttl / --dscp / --ecn / --ip-id / --no-df / --udp-checksum compute|zero|0xNNNN
 #   送信元ポート: --source-port（udp / raw-ip 共通）
+
+# タイムスタンプ（Linux）: auto（既定）/ kernel / user
+ntpterminal stats 192.168.92.234 --timestamping kernel
 ```
 
 ## アーキテクチャ（DDD + レイヤーごとのクレート）
@@ -75,7 +78,9 @@ sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
 - `PcTime` は必ず `Timebase` を持つ。違う `Timebase` どうしの差は `TimebaseMismatch` エラー（実行時に検証）。
   送信モードは実行時に選ぶので、型パラメータでの強制はしない。
 - ドメインは `now()` を呼ばない。時刻は必ず引数で受け取る（`ClockPort` は infrastructure が実装）。
-- `Anchor` は必ず Monotonic。カーネル / NIC の時刻は採用前に変換する（M4 で `TimebaseMapper` ポートを追加予定）。
+- `Anchor` は必ず Monotonic。**カーネル / NIC の時刻は transport の中でモノトニック時計に写してから**ドメインに渡す
+  （`infrastructure::clock::rebase_kernel_time`）。ドメインは常にモノトニック時計の時刻だけを見る。
+  `Timebase` の Monotonic 以外の値は予約（ドメインの安全網として残している）。
 - NTP 時刻の差は `wrapping_since` / `wrapping_add` を使う（2036-02-07 の era 一周をまたいでも正しい）。
   絶対時刻への変換は `to_unix_nanos`（秒 < 0x8000_0000 を era 1 とみなすピボット方式）。
 - 固定小数 ↔ ナノ秒の変換は最も近い値に丸める（往復で値が変わらないように）。
@@ -103,7 +108,8 @@ sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
 2. **M2（済）**: TUI（`tui` サブコマンド）… 大きい数字・情報欄。Sparkline は任意（未実装）。
 3. **M3（済）**: `raw-ip` モード（Linux）… IPv4 / UDP ヘッダの生成（`packet_crafting::ipv4_udp`）。
    送信方式は TUI・`once`・`stats` に表示する。
-4. M4: `link` モード、カーネル / NIC タイムスタンプ（`Timebase` の追加分を使う）
+4. M4: カーネルのタイムスタンプ（**済**・Linux）/ `link` モード（Ethernet フレーム）と NIC（ハードウェア）の
+   タイムスタンプ（未実装。NIC のタイムスタンプは対応 NIC がないと検証できない）
 
 ## raw-ip モードの決まりごと
 
@@ -130,6 +136,23 @@ unshare -rn sh -c "ip link set lo up && $BIN --ignored --test-threads=1"
 
 ループバックでは UDP チェックサムが検証されないことがあるので、テストでは送信したパケットを横から
 受け取ってチェックサムを計算し直している。
+
+## タイムスタンプの決まりごと（M4）
+
+- `--timestamping auto|kernel|user`（既定 auto）。カーネルのタイムスタンプは Linux のみ・権限不要（SO_TIMESTAMPING、ソフトウェア）。
+  Linux 以外で `kernel` を指定したらエラー、`auto` はユーザ空間に戻る。
+- 実装は `infrastructure/src/transport/kernel_ts.rs`。UDP と raw-ip の両方で使う（raw-ip は受信用・送信用で別ソケット）。
+- **T1 と T4 の出どころをそろえる**: 送信時刻（T1）がカーネルから取れなかった問い合わせでは、
+  受信（T4）もユーザ空間の時刻にする。片方だけカーネルの時刻だと offset が片道の遅れの半分ほど偏る。
+  例外: T1 がカーネルの時刻なのに受信時刻が取れない（まれ）ときは、T1 を後から変えられないので混在になる。
+- 送信時刻はエラーキュー（MSG_ERRQUEUE）から読む。OPT_ID の番号で照合し、古い送信の時刻を使わない。
+  エラーキューは毎回空にする（溜まると受信バッファを圧迫する）。3 回続けて取れなければ送信時刻の取得を
+  setsockopt ごとやめる。MSG_CTRUNC の制御メッセージは「時刻なし」として扱う。
+- 実際に使えた時刻の出どころは `application::timestamping::TimestampingStatus` に記録し、TUI・stats・once に出す
+  （「カーネル」と表示したまま実はユーザ空間、を起こさない）。
+- テスト: `crates/infrastructure/tests/kernel_timestamps.rs`（Linux・通常のテスト）はカウンタで
+  「T1 と T4 の両方がカーネルの時刻だった」ことを確かめる。成功しただけ・offset が合っただけでは確かめない。
+- 32 bit の Linux（32 bit 版 Raspberry Pi OS など）では制御メッセージの時刻の形式が違う可能性があるので、使う前に確認する。
 
 ## TUI の決まりごと
 

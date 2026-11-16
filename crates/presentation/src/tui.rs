@@ -14,10 +14,14 @@ mod theme;
 pub use app::run;
 pub use snapshot_sender::SnapshotSender;
 
+use std::sync::Arc;
+
+use application::timestamping::TimestampingStatus;
+
 use crate::format::DisplayZone;
 
 /// 画面の設定。
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct TuiConfig {
     /// 最上部の見出し（字間を空けて表示する）
     pub title: String,
@@ -28,4 +32,6 @@ pub struct TuiConfig {
     pub zone: DisplayZone,
     /// 送信方式の表示名（"UDP ソケット" / "raw-ip（…）"）
     pub transport: String,
+    /// タイムスタンプの取得状況（送受信のスレッドが更新する）
+    pub timestamping: Arc<TimestampingStatus>,
 }
