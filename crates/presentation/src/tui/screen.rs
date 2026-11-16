@@ -55,7 +55,7 @@ pub(crate) struct ScreenModel {
 
 /// スナップショットと現在時刻から、画面に出す内容を組み立てる。
 ///
-/// - `history`: 推移のグラフに使う、これまでの測定値
+/// - `history`: 推移のグラフに使う、これまでの測定値（`config.trend` のときだけ使う）
 /// - `shown`: 大きい時計に出す時刻（[`domain::time_sync::DisplayClock`] の結果）
 /// - `now`: モノトニック時計の現在値（「何秒前」「何秒後」の計算に使う）
 pub(super) fn build(
@@ -84,7 +84,11 @@ pub(super) fn build(
         status,
         status_color,
         rows: info_rows(config, snapshot, now),
-        trends: trend::trends(history),
+        trends: if config.trend {
+            trend::trends(history)
+        } else {
+            Vec::new()
+        },
         footer: config.footer.clone(),
     }
 }
@@ -363,8 +367,17 @@ mod tests {
             server_label: "192.168.1.123".into(),
             footer: footer.map(str::to_owned),
             zone: DisplayZone::jst(),
+            trend: false,
             transport: "UDP ソケット".into(),
             timestamping: Arc::new(TimestampingStatus::new()),
+        }
+    }
+
+    /// `--trend` を付けたときの設定。
+    fn with_trend(config: TuiConfig) -> TuiConfig {
+        TuiConfig {
+            trend: true,
+            ..config
         }
     }
 
@@ -517,7 +530,7 @@ mod tests {
         let now = seven_seconds_later();
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
         let model = build(
-            &config(Some("Sponsored by Example Inc.")),
+            &with_trend(config(Some("Sponsored by Example Inc."))),
             Some(&snapshot),
             &recent_history(),
             Some(shown),
@@ -567,11 +580,29 @@ mod tests {
     }
 
     #[test]
-    fn trends_never_shrink_the_clock() {
+    fn trends_are_hidden_by_default() {
         let snapshot = synced_snapshot();
         let now = seven_seconds_later();
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
         let config = config(Some("footer"));
+        let model = build(
+            &config,
+            Some(&snapshot),
+            &recent_history(),
+            Some(shown),
+            now,
+        );
+        assert_eq!(model.trends, []);
+        let text = render_text(&model, 300, 60).join("\n");
+        assert!(!text.contains("測定値"));
+    }
+
+    #[test]
+    fn trends_never_shrink_the_clock() {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let config = with_trend(config(Some("footer")));
         let with = build(
             &config,
             Some(&snapshot),
@@ -595,25 +626,11 @@ mod tests {
                 render_text(&without, width, height),
                 "{width}×{height}"
             );
-            assert!(
-                !lines
-                    .join(
-                        "
-"
-                    )
-                    .contains("測定値"),
-                "{width}×{height}"
-            );
+            assert!(!lines.join("\n").contains("測定値"), "{width}×{height}");
         }
         // 余裕があれば出す
-        assert!(
-            render_text(&with, 300, 60)
-                .join(
-                    "
-"
-                )
-                .contains("直近 3 回の測定値")
-        );
+        let text = render_text(&with, 300, 60).join("\n");
+        assert!(text.contains("直近 3 回の測定値"));
     }
 
     #[test]
@@ -622,7 +639,7 @@ mod tests {
         let now = seven_seconds_later();
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
         let model = build(
-            &config(Some("footer")),
+            &with_trend(config(Some("footer"))),
             Some(&snapshot),
             &recent_history(),
             Some(shown),

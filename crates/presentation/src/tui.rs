@@ -29,6 +29,8 @@ pub struct TuiConfig {
     pub server_label: String,
     /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない
     pub footer: Option<String>,
+    /// 測定値の推移のグラフを出すか（既定では出さない）
+    pub trend: bool,
     pub zone: DisplayZone,
     /// 送信方式の表示名（"UDP ソケット" / "raw-ip（…）"）
     pub transport: String,

@@ -244,6 +244,9 @@ struct TuiArgs {
     /// 最下部に出す一文（スポンサー表記など）
     #[arg(long)]
     footer: Option<String>,
+    /// 直近の測定値の推移（オフセットと遅延の棒グラフ）を出す。時計が縮まない大きさの端末でだけ出る
+    #[arg(long)]
+    trend: bool,
     #[command(flatten)]
     zone: ZoneArgs,
     #[command(flatten)]
@@ -356,6 +359,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         title: args.title.clone(),
         server_label: args.server.trim().to_owned(),
         footer: args.footer.clone(),
+        trend: args.trend,
         zone,
         transport: transport_label,
         timestamping,
