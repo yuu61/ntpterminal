@@ -95,6 +95,7 @@ fn query_over_raw_ip_sends_crafted_headers() {
             identification: 0x4242,
             dont_fragment: true,
             ttl: 7,
+            header_checksum: None,
         },
         udp_checksum: UdpChecksum::Compute,
     };
@@ -201,7 +202,8 @@ fn raw_ip_uses_kernel_time_for_both_send_and_receive() {
         Arc::clone(&clock),
         Arc::clone(&status),
     )
-    .unwrap();
+    .unwrap()
+    .port;
     query_once(
         port,
         RandomNonce::new(),

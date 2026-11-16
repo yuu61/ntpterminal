@@ -28,6 +28,8 @@ thiserror = "2.0.21"
 [workspace.lints.clippy]
 # module は `foo.rs` + `foo/` 形式に統一する（`mod.rs` 禁止）
 mod_module_files = "deny"
+# unsafe には必ず SAFETY コメントを付ける（unsafe は infrastructure だけで許可）
+undocumented_unsafe_blocks = "deny"
 
 [package]
 name = "ntpterminal"

@@ -22,7 +22,11 @@ cargo run -- stats 127.0.0.1:12300
 # raw-ip モード（Linux・root）: IPv4 / UDP ヘッダを自作して送る
 sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
 #   ヘッダ指定: --ttl / --dscp / --ecn / --ip-id / --no-df / --udp-checksum compute|zero|0xNNNN
-#   送信元ポート: --source-port（udp / raw-ip 共通）
+#   送信元ポート: --source-port（udp / raw-ip / link 共通）
+
+# link モード（Linux・root）: Ethernet フレームから自作して送る（IP ヘッダはカーネルに書き換えられない）
+sudo ntpterminal tui 192.168.92.234 --transport link --vlan 10 --pcp 5 --dscp 46
+#   Ethernet の指定: --dst-mac（省略時は近隣表か ARP）/ --vlan / --pcp、IP の指定: --ip-checksum 0xNNNN
 
 # タイムスタンプ（Linux）: auto（既定）/ kernel / user
 ntpterminal stats 192.168.92.234 --timestamping kernel
@@ -108,8 +112,8 @@ ntpterminal stats 192.168.92.234 --timestamping kernel
 2. **M2（済）**: TUI（`tui` サブコマンド）… 大きい数字・情報欄。Sparkline は任意（未実装）。
 3. **M3（済）**: `raw-ip` モード（Linux）… IPv4 / UDP ヘッダの生成（`packet_crafting::ipv4_udp`）。
    送信方式は TUI・`once`・`stats` に表示する。
-4. M4: カーネルのタイムスタンプ（**済**・Linux）/ `link` モード（Ethernet フレーム）と NIC（ハードウェア）の
-   タイムスタンプ（未実装。NIC のタイムスタンプは対応 NIC がないと検証できない）
+4. M4: カーネルのタイムスタンプ（**済**・Linux）/ `link` モード（**済**・Linux）/ NIC（ハードウェア）の
+   タイムスタンプ（未実装。`ethtool -T` で全パケットの受信に時刻を付けられる NIC がないと検証できない）
 
 ## raw-ip モードの決まりごと
 
@@ -124,7 +128,24 @@ ntpterminal stats 192.168.92.234 --timestamping kernel
   transport の中で通し、期限は 1 回の recv につき最初に 1 回だけ決める。
 - 指定できない組み合わせは黙って無視しない（UDP モードでのヘッダ指定はエラー）。
 
-### raw ソケットのテスト
+## link モードの決まりごと
+
+- Linux のみ。AF_PACKET（root か CAP_NET_RAW）。Ethernet とループバックのインターフェースだけ（tun などは分かるエラー）。
+- カーネルは IP ヘッダに手を加えない: Identification 0 も、`--ip-checksum` の固定値もそのまま届く。
+  `--ip-checksum` / `--dst-mac` / `--vlan` / `--pcp` を udp / raw-ip で指定したらエラー（`transport::validate`）。
+- インターフェースは「サーバに connect した UDP ソケットの送信元 IP」を持つものを使う（getifaddrs）。
+- 宛先 MAC: `--dst-mac` → 近隣表（/proc/net/arp、ATF_COM のものだけ）→ 自前の ARP 要求。
+  次の転送先は /proc/net/route の最長一致・メトリック最小（ポリシールーティングには非対応）。
+  **VLAN を使うときは ARP 要求にも同じタグを付け、近隣表は見ない。**
+- AF_PACKET のソケットはプロトコル 0 で作ってから、インターフェースと EtherType に bind する。
+  プロトコルの値はネットワークバイト順（`link_addr` の中で変換）。
+- 受信では自分の送信の写し（PACKET_OUTGOING）を捨て、送信元・宛先で絞り込む。BPF は使っていない。
+- `sockaddr_ll` を作る `unsafe` は `transport/link/interface.rs` の `link_addr` だけ。
+  `clippy::undocumented_unsafe_blocks` を deny にしているので、`unsafe` には必ず `// SAFETY:` を書く。
+- カーネルの送信時刻は AF_PACKET では `SOL_PACKET` / `PACKET_TX_TIMESTAMP` の制御メッセージで届く
+  （nix は解釈しないので `kernel_ts::send_timestamp_id` で読む）。
+
+### raw ソケット・AF_PACKET のテスト
 
 `crates/infrastructure/tests/raw_ip.rs` は `#[ignore]`。WSL / Linux で、ビルドは通常ユーザ、実行は
 ネットワーク名前空間の中で行う（root 不要・ホストのネットワークに影響しない）:
@@ -132,10 +153,21 @@ ntpterminal stats 192.168.92.234 --timestamping kernel
 ```sh
 BIN=$(cargo test -p ntpterminal-infrastructure --test raw_ip --no-run 2>&1 | grep -oE "/[^ )]+raw_ip-[0-9a-f]+" | head -1)
 unshare -rn sh -c "ip link set lo up && $BIN --ignored --test-threads=1"
+# link のテスト（crates/infrastructure/tests/link.rs）はループバックで自分あてに送るので、
+# 名前空間の中でだけ lo の route_localnet と accept_local を 1 にする（AF_PACKET から入れたフレームは
+# 受信側の経路判定を通り、127.0.0.1 あて・自分が送信元のものは既定で捨てられるため）
+unshare -rn sh -c "ip link set lo up && echo 1 > /proc/sys/net/ipv4/conf/lo/route_localnet \
+  && echo 1 > /proc/sys/net/ipv4/conf/lo/accept_local && $BIN --ignored --test-threads=1"
 ```
 
 ループバックでは UDP チェックサムが検証されないことがあるので、テストでは送信したパケットを横から
 受け取ってチェックサムを計算し直している。
+
+実際の MAC・自前の ARP・VLAN タグ（PCP）は、veth でつないだ 2 つの名前空間で確かめる（root 不要）:
+
+```sh
+sh scripts/link_veth_check.sh <ntpterminal のパス>   # 「すべて OK」と出れば成功
+```
 
 ## タイムスタンプの決まりごと（M4）
 

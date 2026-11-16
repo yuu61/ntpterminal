@@ -48,6 +48,7 @@ fn open(
         Arc::clone(status),
     )
     .unwrap()
+    .port
 }
 
 #[test]
