@@ -534,6 +534,14 @@ transport = \"udp\"
             )
             .contains("/dev/ptp0 の形")
         );
+        // 数字だけは /dev/ptpN の書き間違い（インターフェース名にしない）
+        assert!(
+            parse_error(
+                "phc = \"1\"
+"
+            )
+            .contains("/dev/ptp1 の形")
+        );
     }
 
     /// オプションを足したのに設定ファイル（と例）に足し忘れることを防ぐ。

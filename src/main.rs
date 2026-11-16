@@ -27,8 +27,8 @@ use application::port::{ClockPort, PacketPort, PhcPort};
 use application::snapshot::ReceiverSnapshot;
 use application::timestamping::TimestampingStatus;
 use application::usecase::{
-    PhcRequest, PhcService, Ptp4lClient, Ptp4lClientConfig, ReceiverMonitor, ReceiverMonitorConfig,
-    SyncService, query_once, select_phc,
+    PhcRequest, PhcSelectionError, PhcService, Ptp4lClient, Ptp4lClientConfig, ReceiverMonitor,
+    ReceiverMonitorConfig, SyncService, query_once, select_phc,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::packet_crafting::{
@@ -179,6 +179,12 @@ fn parse_phc(text: &str) -> Result<PhcRequest, String> {
     let trimmed = text.trim();
     if trimmed.is_empty() {
         return Err("PHC は /dev/ptpN かインターフェース名で指定してください".to_owned());
+    }
+    // 数字だけはインターフェース名とせず、/dev/ptpN の書き間違いとして知らせる
+    if trimmed.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(format!(
+            "PHC は /dev/ptp{trimmed} の形で指定してください（数字だけはインターフェース名とみなしません）"
+        ));
     }
     trimmed.strip_prefix("/dev/ptp").map_or_else(
         || Ok(PhcRequest::Interface(trimmed.to_owned())),
@@ -831,8 +837,15 @@ fn open_ptp4l(
         .context(
             "ptp4l のポートを読めません（ドメイン番号は --ptp-domain、ソケットは --ptp4l-socket で指定できます）",
         )?;
-    let selected = select_phc(&ports, ptp.phc.as_ref(), ptp4l::interface_phc)
-        .context("表示する PHC を決められません（--phc で指定できます）")?;
+    let selected = select_phc(&ports, ptp.phc.as_ref(), ptp4l::interface_phc).map_err(|error| {
+        // --phc で選べるのは、ptp4l が複数の PHC を合わせているときだけ
+        let context = if matches!(error, PhcSelectionError::Ambiguous { .. }) {
+            "表示する PHC を決められません（--phc で指定できます）"
+        } else {
+            "表示する PHC を決められません"
+        };
+        anyhow::Error::new(error).context(context)
+    })?;
     let opened = ptp4l::open_phc(selected.index, Arc::clone(clock)).context("PHC を開けません")?;
     let mut notes = Vec::new();
     if selected.vclock {

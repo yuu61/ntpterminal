@@ -127,7 +127,7 @@ sudo env NTPTERMINAL_PHC=0 <実行ファイル> --ignored --nocapture reads_a_re
 
 テストが出す値（ポートの状態・マスタとの差・経路遅延・グランドマスタ・clockClass・UTC との差・時刻系）を、
 `pmc` の表示と見比べる。ソフトウェアのタイムスタンプの ptp4l は PHC を使わないので、`ntpterminal once --ptp4l` は
-「ソフトウェアのタイムスタンプで動いています」のエラーになる（それが正しい）。WSL2 には Hyper-V の PHC
+「ptp4l が合わせている PHC がありません。…はソフトウェアのタイムスタンプ（-S）です」のエラーになる（それが正しい）。WSL2 には Hyper-V の PHC
 （`/dev/ptp0`）があり、`PTP_SYS_OFFSET_PRECISE` と `_EXTENDED` には対応していないので、`PTP_SYS_OFFSET` で読む。
 
 ### 実機（ハードウェアのタイムスタンプの ptp4l）
@@ -147,3 +147,12 @@ PC の時計を合わせていればほぼ 0 になることを確かめる。pt
 （`ethtool --get-hwtimestamp-cfg eth0`）を変え、終了しても戻さない。PTP のマルチキャストのグループにも参加し、
 マスタが見つからなければ自分がマスタになって Announce・Sync を送る（`clientOnly 1` で防げる）。
 共用のネットワークで試すときは、先に影響を確かめておく。
+
+- `free_running 1` の ptp4l は、ハードウェアのタイムスタンプでも PHC の番号を -1 と知らせる（PHC を合わせない）ので、
+  「nic0 は PHC の番号が -1 です」のエラーになる。PHC の表示を確かめるときは付けない
+- chrony が同じ NIC のハードウェアのタイムスタンプ（`hwtimestamp`）を使っているときは、ptp4l の既定の設定だと
+  受信の設定が PTP だけになり、chrony が NTP の受信時刻を取れなくなる。ptp4l の設定に `hwts_filter check`
+  （設定を変えずに、いまの設定で足りるか確かめるだけ。`all` なら足りる）を書く
+- マスタのいない LAN で `clientOnly 1`・`network_transport L2` にすると、ptp4l は LISTENING のまま何も送らない。
+  この状態でも PHC は読むので、`once`（終了コード 1）・`stats`・`tui`（大きな時計は `--:--:--.---`）の表示と、
+  ptp4l が知らせる PHC・読み方（「同時読み取り」）を確かめられる（2026-11 に I219-V・linuxptp 4.2 で確認）

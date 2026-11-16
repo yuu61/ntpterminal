@@ -99,10 +99,21 @@ impl PortTimestamping {
         }
     }
 
-    /// PHC を使う方式か（ソフトウェアのタイムスタンプなら、ptp4l はシステムの時計を合わせる）。
+    /// PHC を使う方式か（ソフトウェアと従来の方式のハードウェアのタイムスタンプでは、ptp4l は
+    /// システムの時計を合わせる。linuxptp の `clock_create` で PHC の番号が -1 になる）。
     #[must_use]
     pub const fn uses_phc(self) -> bool {
-        !matches!(self, Self::Software)
+        self.without_phc_label().is_none()
+    }
+
+    /// PHC を使わない方式の説明（エラーの文言）。PHC を使う方式なら `None`。
+    #[must_use]
+    pub const fn without_phc_label(self) -> Option<&'static str> {
+        match self {
+            Self::Software => Some("ソフトウェアのタイムスタンプ（-S）"),
+            Self::LegacyHardware => Some("従来の方式のハードウェアのタイムスタンプ（-L）"),
+            Self::Hardware | Self::OneStep | Self::P2pOneStep | Self::Unknown(_) => None,
+        }
     }
 }
 

@@ -313,7 +313,8 @@ impl PortPropertiesNp {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PortHwclockNp {
     pub port: PortIdentity,
-    /// ポートが使う PHC の番号（/dev/ptpN の N。ソフトウェアのタイムスタンプなら負）
+    /// ポートが使う PHC の番号（/dev/ptpN の N。ptp4l が PHC を合わせないとき（ソフトウェア・従来の方式の
+    /// タイムスタンプ、`free_running 1`）は負）
     pub phc_index: i32,
     /// bit 0: 仮想 PHC（vclock）
     pub flags: u8,

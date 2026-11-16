@@ -3,9 +3,12 @@
 //! - PHC の番号は ptp4l が知らせる値（`PORT_HWCLOCK_NP`）を使う。仮想 PHC（vclock）を使う設定では、
 //!   インターフェースの PHC（`ethtool -T` の値）と ptp4l が合わせている PHC が違うため
 //! - `PORT_HWCLOCK_NP` に答えない古い linuxptp（4.0 より前。vclock もない）でだけ、インターフェースの PHC を使う
-//! - ソフトウェアのタイムスタンプのポート（ptp4l の `-S`）は PHC を使わない（ptp4l はシステムの時計を合わせる）
+//! - ソフトウェアと従来の方式のハードウェアのタイムスタンプのポート（ptp4l の `-S`・`-L`）は PHC を使わない
+//!   （ptp4l はシステムの時計を合わせる）
+//! - `free_running 1` の ptp4l は、ハードウェアのタイムスタンプでも PHC の番号を -1 と知らせる（PHC を合わせない。
+//!   linuxptp の `clock_create`）。合わせていない PHC は表示しない（スレーブもサーボが固定せず UNCALIBRATED のまま）
 //! - 使える PHC が 1 つもない・2 つ以上あって指定がない・指定した PHC を ptp4l が使っていないときはエラーにする
-//!   （黙って別の時計を表示しない）
+//!   （黙って別の時計を表示しない）。PHC がないときは、ポートごとに理由を添える
 
 use alloc::collections::BTreeMap;
 
@@ -39,10 +42,9 @@ pub struct SelectedPhc {
 pub enum PhcSelectionError {
     #[error("ptp4l にポートがありません")]
     NoPorts,
-    #[error(
-        "ptp4l のポートはどれも PHC を使っていません（ソフトウェアのタイムスタンプで動いています: {interfaces}）"
-    )]
-    NoHardwareClock { interfaces: String },
+    /// `reasons` はポートごとの理由（"nic0 は PHC の番号が -1 です（…）"。"。" で区切る）
+    #[error("ptp4l が合わせている PHC がありません。{reasons}")]
+    NoHardwareClock { reasons: String },
     #[error("ptp4l は複数の PHC を使っています（{used}）。表示する PHC を指定してください")]
     Ambiguous { used: String },
     #[error("ptp4l は {requested} を使っていません（使っているもの: {used}）")]
@@ -70,15 +72,28 @@ where
     if ports.is_empty() {
         return Err(PhcSelectionError::NoPorts);
     }
-    // PHC ごとに、使うポートをまとめる（番号の順）
+    // PHC ごとに、使うポートをまとめる（番号の順）。PHC を使わないポートは理由を残す
     let mut by_index: BTreeMap<u32, Vec<(&Ptp4lPort, bool)>> = BTreeMap::new();
-    for port in ports.iter().filter(|port| port.timestamping.uses_phc()) {
+    let mut without_phc = Vec::new();
+    for port in ports {
+        if let Some(label) = port.timestamping.without_phc_label() {
+            without_phc.push(format!(
+                "{} は{label}です（ptp4l はシステムの時計を合わせます）",
+                port.interface
+            ));
+            continue;
+        }
         let (index, from_interface) = match port.hwclock {
-            Some(hwclock) => match u32::try_from(hwclock.index) {
-                Ok(index) => (index, false),
-                // PHC を使わないポート
-                Err(_) => continue,
-            },
+            Some(hwclock) => {
+                let Ok(index) = u32::try_from(hwclock.index) else {
+                    without_phc.push(format!(
+                        "{} は PHC の番号が {} です（free_running 1 など、ptp4l が PHC を合わせない設定）",
+                        port.interface, hwclock.index
+                    ));
+                    continue;
+                };
+                (index, false)
+            }
             None => (
                 interface_phc(&port.interface).ok_or_else(|| PhcSelectionError::Unknown {
                     interface: port.interface.clone(),
@@ -93,7 +108,7 @@ where
     }
     if by_index.is_empty() {
         return Err(PhcSelectionError::NoHardwareClock {
-            interfaces: join(ports.iter().map(|port| port.interface.clone())),
+            reasons: without_phc.join("。"),
         });
     }
     let used = || {
@@ -247,19 +262,42 @@ mod tests {
         ));
     }
 
+    /// ソフトウェア・従来の方式のハードウェアのタイムスタンプは、古い linuxptp でもインターフェースの PHC を使わない。
     #[test]
     fn software_timestamping_has_no_phc() {
-        let mut software = port(1, "veth0", Some(-1i32));
+        let mut software = port(1, "veth0", None);
         software.timestamping = PortTimestamping::Software;
+        let mut legacy = port(2, "eth1", None);
+        legacy.timestamping = PortTimestamping::LegacyHardware;
+        let Err(error) = select_phc(&[software, legacy], None, |_| Some(0)) else {
+            panic!("PHC はないはず");
+        };
         assert_eq!(
-            select_phc(&[software], None, |_| Some(0)),
-            Err(PhcSelectionError::NoHardwareClock {
-                interfaces: "veth0".to_owned(),
-            })
+            error.to_string(),
+            "ptp4l が合わせている PHC がありません。\
+             veth0 はソフトウェアのタイムスタンプ（-S）です（ptp4l はシステムの時計を合わせます）。\
+             eth1 は従来の方式のハードウェアのタイムスタンプ（-L）です（ptp4l はシステムの時計を合わせます）"
         );
         assert_eq!(
             select_phc(&[], None, no_lookup),
             Err(PhcSelectionError::NoPorts)
         );
+    }
+
+    /// `free_running 1`: ハードウェアのタイムスタンプでも、ptp4l は PHC の番号を -1 と知らせる（linuxptp 4.2 で確認）。
+    /// 番号を指定しても、合わせていない PHC は表示しない。
+    #[test]
+    fn a_free_running_ptp4l_has_no_phc() {
+        let ports = [port(1, "nic0", Some(-1i32))];
+        for requested in [None, Some(PhcRequest::Index(0))] {
+            let Err(error) = select_phc(&ports, requested.as_ref(), |_| Some(0)) else {
+                panic!("PHC はないはず");
+            };
+            assert_eq!(
+                error.to_string(),
+                "ptp4l が合わせている PHC がありません。\
+                 nic0 は PHC の番号が -1 です（free_running 1 など、ptp4l が PHC を合わせない設定）"
+            );
+        }
     }
 }

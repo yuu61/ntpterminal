@@ -123,7 +123,7 @@ trend = true
 | `--ptp4l`        | `ptp4l`        | フラグ                                   | 無効   | NTP サーバの代わりに、ptp4l が合わせる PHC の時刻を表示する |
 | `--ptp4l-socket` | `ptp4l-socket` | パス                                     | `/var/run/ptp/ptp4l`、なければ `/var/run/ptp4l` | ptp4l の管理用ソケット（ptp4l の `uds_address`）。読み取り専用のソケット（`uds_ro_address`）は使えない |
 | `--ptp-domain`   | `ptp-domain`   | 0〜255                                   | 0      | ptp4l のドメイン番号（`domainNumber`）。違うと ptp4l は応答しない |
-| `--phc`          | `phc`          | `/dev/ptp0` の形か、インターフェース名   | ptp4l が使う PHC | 表示する PHC。ptp4l が複数の PHC を使うとき（ポートごとに別の NIC など）だけ指定が要る |
+| `--phc`          | `phc`          | `/dev/ptp0` の形か、インターフェース名   | ptp4l が使う PHC | 表示する PHC。ptp4l が複数の PHC を使うとき（ポートごとに別の NIC など）だけ指定が要る。数字だけ（`0`）はエラー |
 
 ### tui（設定ファイルでは `[tui]`）
 
