@@ -21,7 +21,8 @@ use application::timestamping::TimestampingStatus;
 use domain::shared_kernel::LocalStamp;
 use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
 use nix::sys::socket::{
-    ControlMessageOwned, MsgFlags, TimestampingFlag, Timestamps, recvmsg, setsockopt, sockopt,
+    ControlMessageOwned, MsgFlags, SockaddrLike, TimestampingFlag, Timestamps, recvmsg, setsockopt,
+    sockopt,
 };
 use nix::sys::time::TimeSpec;
 
@@ -35,6 +36,10 @@ const MAX_CONSECUTIVE_TX_MISSES: u32 = 3;
 const SO_EE_ORIGIN_TIMESTAMPING: u8 = 4;
 /// sock_extended_err.ee_info: 送信時刻
 const SCM_TSTAMP_SND: u32 = 0;
+/// AF_PACKET のエラーキューでの制御メッセージの種類（SOL_PACKET / PACKET_TX_TIMESTAMP）。
+/// nix は解釈しないので、中身（sock_extended_err）を自分で読む
+const SOL_PACKET: i32 = 263;
+const PACKET_TX_TIMESTAMP: i32 = 16;
 
 fn rx_flags() -> TimestampingFlag {
     TimestampingFlag::SOF_TIMESTAMPING_SOFTWARE | TimestampingFlag::SOF_TIMESTAMPING_RX_SOFTWARE
@@ -145,9 +150,17 @@ pub(crate) fn recv_with_timestamp(
     socket: &impl AsFd,
     buf: &mut [u8],
 ) -> io::Result<(usize, Option<i128>)> {
+    recv_with_timestamp_from::<()>(socket, buf).map(|(len, timestamp, _)| (len, timestamp))
+}
+
+/// [`recv_with_timestamp`] と同じだが、送信元のアドレスも返す（AF_PACKET でパケットの種別を見るため）。
+pub(crate) fn recv_with_timestamp_from<S: SockaddrLike>(
+    socket: &impl AsFd,
+    buf: &mut [u8],
+) -> io::Result<(usize, Option<i128>, Option<S>)> {
     let mut iov = [IoSliceMut::new(buf)];
     let mut cmsg = nix::cmsg_space!(Timestamps);
-    let message = recvmsg::<()>(
+    let message = recvmsg::<S>(
         socket.as_fd().as_raw_fd(),
         &mut iov,
         Some(&mut cmsg),
@@ -163,7 +176,7 @@ pub(crate) fn recv_with_timestamp(
             })
         })
     };
-    Ok((message.bytes, timestamp))
+    Ok((message.bytes, timestamp, message.address))
 }
 
 /// エラーキューの 1 件。
@@ -245,11 +258,31 @@ fn read_error_entry(socket: &impl AsFd) -> Option<TxEntry> {
                 {
                     entry.id = Some(error.ee_data);
                 }
+                // AF_PACKET では sock_extended_err が SOL_PACKET / PACKET_TX_TIMESTAMP で届く
+                ControlMessageOwned::Unknown(unknown)
+                    if unknown.cmsg_header.cmsg_level == SOL_PACKET
+                        && unknown.cmsg_header.cmsg_type == PACKET_TX_TIMESTAMP =>
+                {
+                    if let Some(id) = send_timestamp_id(&unknown.data_bytes) {
+                        entry.id = Some(id);
+                    }
+                }
                 _ => {}
             }
         }
     }
     Some(entry)
+}
+
+/// sock_extended_err のバイト列が送信時刻の通知なら、その OPT_ID 番号を返す。
+///
+/// 並び（Linux）: ee_errno u32 / ee_origin u8 / ee_type u8 / ee_code u8 / ee_pad u8 / ee_info u32 / ee_data u32
+fn send_timestamp_id(bytes: &[u8]) -> Option<u32> {
+    let bytes = bytes.get(..16)?;
+    let origin = bytes[4];
+    let info = u32::from_ne_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    let data = u32::from_ne_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
+    (origin == SO_EE_ORIGIN_TIMESTAMPING && info == SCM_TSTAMP_SND).then_some(data)
 }
 
 /// エラーキューを空にする（溜まると受信バッファを圧迫して応答が落ちるため）。
@@ -284,6 +317,25 @@ mod tests {
             without_id.timestamp_for(0),
             None,
             "番号のない通知は使わない"
+        );
+    }
+
+    #[test]
+    fn reads_send_timestamp_id_from_extended_error_bytes() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(&42u32.to_ne_bytes()); // ee_errno（ENOMSG）
+        bytes.extend_from_slice(&[SO_EE_ORIGIN_TIMESTAMPING, 0, 0, 0]);
+        bytes.extend_from_slice(&SCM_TSTAMP_SND.to_ne_bytes());
+        bytes.extend_from_slice(&9u32.to_ne_bytes()); // OPT_ID 番号
+        assert_eq!(send_timestamp_id(&bytes), Some(9));
+
+        let mut other_origin = bytes.clone();
+        other_origin[4] = 2; // ICMP
+        assert_eq!(send_timestamp_id(&other_origin), None);
+        assert_eq!(
+            send_timestamp_id(&bytes[..15]),
+            None,
+            "短すぎるものは読まない"
         );
     }
 

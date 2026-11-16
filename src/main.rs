@@ -13,11 +13,13 @@ use std::time::Duration;
 
 use anyhow::{Context, bail};
 use application::polling_policy;
-use application::port::{ClockPort, PacketPort};
+use application::port::ClockPort;
 use application::timestamping::TimestampingStatus;
 use application::usecase::{SyncService, query_once};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use domain::packet_crafting::{HeaderTemplate, Ipv4Spec, RequestTemplate, UdpChecksum};
+use domain::packet_crafting::{
+    EthernetSpec, HeaderTemplate, Ipv4Spec, MacAddr, RequestTemplate, UdpChecksum, VlanTag,
+};
 use domain::shared_kernel::TimeDelta;
 use domain::time_sync::SourceConfig;
 use infrastructure::clock::SystemClock;
@@ -25,7 +27,8 @@ use infrastructure::nonce::RandomNonce;
 use infrastructure::resolve::resolve_server;
 use infrastructure::sim_server::{SimServer, SimServerConfig};
 use infrastructure::transport::{
-    self as transport_layer, TimestampingMode, TransportMode, TransportOptions,
+    self as transport_layer, LinkOptions, OpenedTransport, TimestampingMode, TransportMode,
+    TransportOptions,
 };
 use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
@@ -81,6 +84,8 @@ enum ModeArg {
     Udp,
     /// IPv4 / UDP ヘッダを自作して raw ソケットで送る（Linux のみ・root か CAP_NET_RAW が必要）
     RawIp,
+    /// Ethernet フレームから自作して AF_PACKET で送る（Linux のみ・root か CAP_NET_RAW が必要）
+    Link,
 }
 
 /// タイムスタンプの取り方（CLI での指定）。
@@ -105,24 +110,36 @@ struct TransportArgs {
     /// 送信元ポート（省略時は OS に任せる）
     #[arg(long)]
     source_port: Option<u16>,
-    /// [raw-ip] IP の TTL
+    /// [raw-ip / link] IP の TTL
     #[arg(long)]
     ttl: Option<u8>,
-    /// [raw-ip] DSCP（0〜63。例: 46 = EF）
+    /// [raw-ip / link] DSCP（0〜63。例: 46 = EF）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
     dscp: Option<u8>,
-    /// [raw-ip] ECN（0〜3）
+    /// [raw-ip / link] ECN（0〜3）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
     ecn: Option<u8>,
-    /// [raw-ip] IP の Identification（0 なら Linux のカーネルが値を入れる）
+    /// [raw-ip / link] IP の Identification（raw-ip では 0 にするとカーネルが値を入れる）
     #[arg(long)]
     ip_id: Option<u16>,
-    /// [raw-ip] DF（Don't Fragment）ビットを立てない
+    /// [raw-ip / link] DF（Don't Fragment）ビットを立てない
     #[arg(long)]
     no_df: bool,
-    /// [raw-ip] UDP チェックサム: compute（既定）/ zero / 0x で始まる 16 進の固定値（試験用）
+    /// [raw-ip / link] UDP チェックサム: compute（既定）/ zero / 0x で始まる 16 進の固定値（試験用）
     #[arg(long, value_parser = parse_udp_checksum)]
     udp_checksum: Option<UdpChecksum>,
+    /// [link] IP ヘッダのチェックサム（0x で始まる 16 進の固定値。試験用）
+    #[arg(long, value_parser = parse_hex_u16)]
+    ip_checksum: Option<u16>,
+    /// [link] 宛先 MAC（省略時は近隣表か ARP で調べる）
+    #[arg(long)]
+    dst_mac: Option<MacAddr>,
+    /// [link] 802.1Q の VLAN ID（0〜4094）
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=4094))]
+    vlan: Option<u16>,
+    /// [link] 802.1Q の優先度 PCP（0〜7。--vlan なしなら VLAN ID 0 の優先度タグになる）
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=7))]
+    pcp: Option<u8>,
 }
 
 impl TransportArgs {
@@ -130,17 +147,19 @@ impl TransportArgs {
         match self.mode {
             ModeArg::Udp => TransportMode::Udp,
             ModeArg::RawIp => TransportMode::RawIp,
+            ModeArg::Link => TransportMode::Link,
         }
     }
 
-    /// ヘッダの指定が 1 つでもあれば `headers` を作る（UDP モードでは open がエラーにする）。
+    /// ヘッダの指定が 1 つでもあれば `headers` / `link` を作る（使えないモードでは open がエラーにする）。
     fn options(&self) -> TransportOptions {
         let specified = self.ttl.is_some()
             || self.dscp.is_some()
             || self.ecn.is_some()
             || self.ip_id.is_some()
             || self.no_df
-            || self.udp_checksum.is_some();
+            || self.udp_checksum.is_some()
+            || self.ip_checksum.is_some();
         let defaults = Ipv4Spec::default();
         let headers = specified.then(|| HeaderTemplate {
             ipv4: Ipv4Spec {
@@ -149,12 +168,23 @@ impl TransportArgs {
                 identification: self.ip_id.unwrap_or(defaults.identification),
                 dont_fragment: !self.no_df,
                 ttl: self.ttl.unwrap_or(defaults.ttl),
+                header_checksum: self.ip_checksum,
             },
             udp_checksum: self.udp_checksum.unwrap_or_default(),
+        });
+        let vlan = (self.vlan.is_some() || self.pcp.is_some()).then(|| VlanTag {
+            pcp: self.pcp.unwrap_or(0),
+            dei: false,
+            vid: self.vlan.unwrap_or(0),
+        });
+        let link = (self.dst_mac.is_some() || vlan.is_some()).then_some(LinkOptions {
+            destination_mac: self.dst_mac,
+            ethernet: EthernetSpec { vlan },
         });
         TransportOptions {
             source_port: self.source_port.unwrap_or(0),
             headers,
+            link,
             timestamping: match self.timestamping {
                 TimestampingArg::Auto => TimestampingMode::Auto,
                 TimestampingArg::Kernel => TimestampingMode::Kernel,
@@ -168,10 +198,16 @@ impl TransportArgs {
         server: SocketAddr,
         clock: Arc<dyn ClockPort>,
         status: Arc<TimestampingStatus>,
-    ) -> anyhow::Result<Box<dyn PacketPort>> {
+    ) -> anyhow::Result<OpenedTransport> {
         transport_layer::open(self.mode(), server, self.options(), clock, status)
             .context("送受信の準備ができません")
     }
+}
+
+fn parse_hex_u16(text: &str) -> Result<u16, String> {
+    text.strip_prefix("0x")
+        .and_then(|hex| u16::from_str_radix(hex, 16).ok())
+        .ok_or_else(|| "0x1234 の形式で指定してください".to_string())
 }
 
 fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
@@ -291,7 +327,10 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
-    let transport = args
+    let OpenedTransport {
+        port: transport,
+        description: transport_label,
+    } = args
         .transport
         .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
     let mut service = SyncService::new(
@@ -318,7 +357,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         server_label: args.server.trim().to_string(),
         footer: args.footer.clone(),
         zone,
-        transport: args.transport.mode().label().to_string(),
+        transport: transport_label,
         timestamping,
     };
     let result = tui::run(&config, clock, rx);
@@ -334,7 +373,10 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     let server = resolve(&args.target.server)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
-    let transport = args
+    let OpenedTransport {
+        port: transport,
+        description: transport_label,
+    } = args
         .transport
         .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
 
@@ -351,7 +393,7 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
                 "{}",
                 once::render_json(
                     server,
-                    args.transport.mode().label(),
+                    &transport_label,
                     timestamping_label(&timestamping.counts()),
                     &outcome,
                 )
@@ -363,7 +405,7 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
                 "{}",
                 once::render_text(
                     server,
-                    args.transport.mode().label(),
+                    &transport_label,
                     timestamping_label(&timestamping.counts()),
                     &outcome,
                     &zone,
@@ -390,7 +432,10 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     }
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
-    let transport = args
+    let OpenedTransport {
+        port: transport,
+        description: transport_label,
+    } = args
         .transport
         .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
     let mut service = SyncService::new(
@@ -406,7 +451,7 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     if args.count == 0 {
         reporter = reporter.with_periodic_summary(20);
     }
-    reporter.write_header(interval, args.transport.mode().label());
+    reporter.write_header(interval, &transport_label);
     service.run(&mut reporter, (args.count > 0).then_some(args.count));
     reporter.write_summary();
     Ok(ExitCode::SUCCESS)

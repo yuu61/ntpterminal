@@ -18,7 +18,7 @@ const FRAGMENT_OFFSET_MASK: u16 = 0x1FFF;
 /// IPv4 ヘッダの指定。
 ///
 /// 注意（Linux の raw ソケット）: ヘッダのチェックサムと全長は常にカーネルが書き換える。
-/// Identification を 0 にするとカーネルが値を入れる。これらを自由にできるのは link モード（M4）。
+/// Identification を 0 にするとカーネルが値を入れる。これらをそのまま送れるのは link モードだけ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Ipv4Spec {
     /// DSCP（6 bit）。例: 46 = EF（優先転送）
@@ -28,6 +28,8 @@ pub struct Ipv4Spec {
     pub identification: u16,
     pub dont_fragment: bool,
     pub ttl: u8,
+    /// ヘッダチェックサム。`None` なら正しく計算する。`Some` は試験用の固定値（link モードでのみ届く）
+    pub header_checksum: Option<u16>,
 }
 
 impl Default for Ipv4Spec {
@@ -38,6 +40,7 @@ impl Default for Ipv4Spec {
             identification: 0,
             dont_fragment: true,
             ttl: 64,
+            header_checksum: None,
         }
     }
 }
@@ -90,7 +93,9 @@ pub fn encode_ipv4_udp(
     packet.extend_from_slice(&[0, 0]); // ヘッダチェックサム（あとで入れる）
     packet.extend_from_slice(&source.ip().octets());
     packet.extend_from_slice(&destination.ip().octets());
-    let header_checksum = internet_checksum(&packet);
+    let header_checksum = spec
+        .header_checksum
+        .unwrap_or_else(|| internet_checksum(&packet));
     packet[10..12].copy_from_slice(&header_checksum.to_be_bytes());
 
     let udp_start = packet.len();
@@ -256,6 +261,7 @@ mod tests {
                 identification: 0x1234,
                 dont_fragment: true,
                 ttl: 7,
+                header_checksum: None,
             },
             udp_checksum: UdpChecksum::Compute,
         };
@@ -295,6 +301,19 @@ mod tests {
         assert_eq!(received.identification, 0x1234);
         assert!(received.dont_fragment);
         assert_eq!(received.payload, &payload);
+    }
+
+    #[test]
+    fn fixed_header_checksum_is_sent_as_is() {
+        let template = HeaderTemplate {
+            ipv4: Ipv4Spec {
+                header_checksum: Some(0x1234),
+                ..Ipv4Spec::default()
+            },
+            ..HeaderTemplate::default()
+        };
+        let packet = encode_ipv4_udp(&template, addr("10.0.0.1:1"), addr("10.0.0.2:123"), b"x");
+        assert_eq!(&packet[10..12], &[0x12, 0x34]);
     }
 
     #[test]
