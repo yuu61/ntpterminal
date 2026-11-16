@@ -138,6 +138,27 @@ pub fn format_date_time(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
     )
 }
 
+/// 時刻だけ: "17:25:45.146"
+pub fn format_clock(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
+    let c = to_civil(timestamp, zone.offset_secs());
+    format!(
+        "{:02}:{:02}:{:02}.{:03}",
+        c.hour,
+        c.minute,
+        c.second,
+        c.nanos / 1_000_000
+    )
+}
+
+/// 日付だけ: "2026-11-15 (日)"
+pub fn format_date(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
+    let c = to_civil(timestamp, zone.offset_secs());
+    format!(
+        "{:04}-{:02}-{:02} ({})",
+        c.year, c.month, c.day, WEEKDAYS_JA[c.weekday as usize]
+    )
+}
+
 /// "2026-11-16T08:25:37.923456789Z"（UTC。JSON 用）
 pub fn format_rfc3339_utc(timestamp: NtpTimestamp) -> String {
     let c = to_civil(timestamp, 0);
@@ -276,6 +297,11 @@ mod tests {
         assert_eq!(
             format_rfc3339_utc(timestamp),
             "2026-11-15T08:25:45.146000000Z"
+        );
+        assert_eq!(format_clock(timestamp, &DisplayZone::jst()), "17:25:45.146");
+        assert_eq!(
+            format_date(timestamp, &DisplayZone::jst()),
+            "2026-11-15 (日)"
         );
     }
 

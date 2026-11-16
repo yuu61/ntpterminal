@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
 
 use application::port::{ClockPort, EventSink, Inbound, NonceSource, PacketPort, TransportError};
@@ -269,4 +269,42 @@ fn query_once_times_out() {
     assert_eq!(result, Err(OnceError::Timeout));
     // 仮想時間で 300ms 待ったところで諦めている
     assert_eq!(clock.now().mono, PcTime::monotonic(300_000_000));
+}
+
+/// 一定数の標本を受け取ったら停止フラグを立てる通知先。
+struct StopAfter {
+    accepted: u64,
+    limit: u64,
+    stop: Arc<AtomicBool>,
+}
+
+impl EventSink for StopAfter {
+    fn publish(&mut self, event: &SyncEvent, _snapshot: &SyncSnapshot) {
+        if matches!(event, SyncEvent::SampleAccepted { .. }) {
+            self.accepted += 1;
+            if self.accepted >= self.limit {
+                self.stop.store(true, Ordering::Relaxed);
+            }
+        }
+    }
+}
+
+#[test]
+fn run_until_returns_when_stop_flag_is_set() {
+    let clock = Arc::new(FakeClock::default());
+    let port = SimPort::new(
+        Arc::clone(&clock),
+        TimeDelta::ZERO,
+        Duration::from_micros(200),
+    );
+    let mut service = service(port, clock);
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut sink = StopAfter {
+        accepted: 0,
+        limit: 3,
+        stop: Arc::clone(&stop),
+    };
+    // 回数無制限でも、停止フラグで戻ってくる
+    service.run_until(&mut sink, None, &stop);
+    assert_eq!(service.snapshot().stats.successes, 3);
 }

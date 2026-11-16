@@ -1,6 +1,7 @@
 //! 同期サービス: 時刻源（集約）とポートをつなぎ、問い合わせを続ける。
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use domain::packet_crafting::{RequestTemplate, decode, encode};
@@ -78,7 +79,18 @@ impl<P: PacketPort, N: NonceSource> SyncService<P, N> {
     /// 問い合わせを続け、起きたことを `sink` に通知する。
     /// `max_attempts` を指定すると、その回数だけ送って最後の応答（かタイムアウト）を待って終わる。
     pub fn run<S: EventSink + ?Sized>(&mut self, sink: &mut S, max_attempts: Option<u64>) {
-        loop {
+        self.run_until(sink, max_attempts, &AtomicBool::new(false));
+    }
+
+    /// [`Self::run`] と同じだが、`stop` が立ったら終わる（TUI の終了時など）。
+    /// 受信待ちの上限が 100ms なので、立ててから最大 100ms ほどで戻る。
+    pub fn run_until<S: EventSink + ?Sized>(
+        &mut self,
+        sink: &mut S,
+        max_attempts: Option<u64>,
+        stop: &AtomicBool,
+    ) {
+        while !stop.load(Ordering::Relaxed) {
             let allow_poll = max_attempts.is_none_or(|max| self.source.stats().attempts < max);
             if !allow_poll && !self.source.is_awaiting_reply() {
                 return;

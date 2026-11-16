@@ -5,6 +5,7 @@
 //! 応答の検証ルール（mode・Originate の照合・KoD・LI など）はすべてここにある。
 
 mod anchor;
+mod display_clock;
 mod event;
 mod filter;
 mod reply;
@@ -14,6 +15,7 @@ mod source;
 mod state;
 
 pub use anchor::Anchor;
+pub use display_clock::DisplayClock;
 pub use event::{RejectReason, SyncEvent};
 pub use filter::ClockFilter;
 pub use reply::ServerReply;

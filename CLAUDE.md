@@ -12,6 +12,7 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all
 
 # 実行例
+cargo run -- tui 192.168.92.234 --footer "Sponsored by ..."   # 大きい時計（q / Esc / Ctrl+C で終了）
 cargo run -- once 192.168.92.234
 cargo run -- once 192.168.92.234 --json
 cargo run -- stats 192.168.92.234 --interval-ms 500 --count 20
@@ -94,9 +95,34 @@ cargo run -- stats 127.0.0.1:12300
 ## マイルストーン
 
 1. **M1（済）**: NTP コア + UDP + CLI（`once` / `stats` / `sim-server`）
-2. M2: TUI（ratatui）… 大きい数字（半ブロック）・情報欄・Sparkline。
-   ratatui はバージョンを固定し、crossterm は単独で入れず `ratatui::crossterm` を使う。
-   同期は別スレッドで回し、`SyncSnapshot` をチャネルで UI に渡す（集約を共有しない）。
-   クロックフィルタが基準点を切り替えても、**大きい時計の表示は逆戻りさせない**（差は少しずつ吸収する）。
-3. M3: `raw-ip` モード（Linux）… IP / UDP ヘッダの生成（`packet_crafting` にヘッダ指定を追加）
+2. **M2（済）**: TUI（`tui` サブコマンド）… 大きい数字・情報欄。Sparkline は任意（未実装）。
+3. M3: `raw-ip` モード（Linux）… IP / UDP ヘッダの生成（`packet_crafting` にヘッダ指定を追加）。
+   送信モードを入れたら、どのモードで動いているかを TUI に表示する。
 4. M4: `link` モード、カーネル / NIC タイムスタンプ（`Timebase` の追加分を使う）
+
+## TUI の決まりごと
+
+- ratatui はバージョンを固定し、crossterm は単独で入れず `ratatui::crossterm` を使う。
+- 同期は別スレッドの `SyncService::run_until` で回し、`SyncSnapshot` をチャネルで UI に渡す（集約を共有しない）。
+- 同期スレッドと UI には **同じ `ClockPort` インスタンス**を渡す（モノトニック時計の起点がずれると黙って狂う）。
+- 大きい時計の表示は `domain::time_sync::DisplayClock` を通す。基準点が切り替わっても**逆戻りさせない**
+  （ずれは経過時間の 50% までの速さで吸収。1 秒を超えるずれのときだけ一度に合わせる）。
+- 配色は 16 色の名前付き ANSI カラーだけ（RGB は Linux コンソールで出ないことがある）。
+- 端末の「曖昧幅（East Asian Ambiguous）」は半角（多くの端末の既定）を前提にする。
+  大きい数字は全点灯セルを背景色付きの空白で描くので、倍率が偶数なら曖昧幅の文字を使わない。
+  奇数倍率の `▀` / `▄` と状態の `●` は曖昧幅。
+- レイアウト計算は `u16` の飽和演算（`saturating_*`）で行う（端末を縮めたときのパニック防止）。
+
+### TUI を自動で確認する（WSL + tmux）
+
+Windows には tmux がないので、WSL（Ubuntu）でビルドして tmux の中で動かす。
+大きい数字は背景色付きの空白なので、`capture-pane -e` の色情報から読み取る必要がある。
+
+```sh
+wsl -e bash -lc 'cd /mnt/c/repository/ntpterminal && CARGO_TARGET_DIR=$HOME/.cache/ntpterminal-target cargo build'
+# B=$HOME/.cache/ntpterminal-target/debug/ntpterminal
+# tmux new-session -d -s ntp -x 120 -y 40 -n sim "$B sim-server --offset-ms -0.978 --refid GNSS"
+# tmux new-window -t ntp -n tui "$B tui 127.0.0.1:12300"
+# tmux capture-pane -t ntp:tui -p        # 「同期済み」が出たら準備完了
+# tmux send-keys -t ntp:tui q; tmux kill-session -t ntp
+```

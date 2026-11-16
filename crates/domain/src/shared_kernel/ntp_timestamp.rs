@@ -53,7 +53,9 @@ impl NtpTimestamp {
 
     /// `self + delta` を求める。era の一周をまたいでも正しい。
     pub fn wrapping_add(self, delta: TimeDelta) -> Self {
-        let fixed = (i128::from(delta.as_nanos()) << 32) / NANOS_PER_SEC;
+        // 最も近い固定小数の値に丸める（0 から遠い側へ丸める四捨五入）
+        let scaled = i128::from(delta.as_nanos()) << 32;
+        let fixed = (scaled + scaled.signum() * (NANOS_PER_SEC / 2)) / NANOS_PER_SEC;
         Self(self.0.wrapping_add(fixed as i64 as u64))
     }
 

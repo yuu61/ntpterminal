@@ -6,6 +6,9 @@ use std::io;
 use std::net::SocketAddr;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
 use std::time::Duration;
 
 use anyhow::{Context, bail};
@@ -24,6 +27,7 @@ use infrastructure::transport::UdpTransport;
 use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
 use presentation::format::DisplayZone;
+use presentation::tui::{self, SnapshotSender, TuiConfig};
 
 #[derive(Parser)]
 #[command(
@@ -38,6 +42,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// 大きい時計の TUI を表示する（q / Esc / Ctrl+C で終了）
+    Tui(TuiArgs),
     /// 1 回だけ問い合わせて結果を表示する
     Once(OnceArgs),
     /// 一定間隔で問い合わせ続け、offset と delay の統計を表示する
@@ -56,18 +62,51 @@ struct TargetArgs {
 }
 
 #[derive(Args)]
-struct OnceArgs {
-    #[command(flatten)]
-    target: TargetArgs,
-    /// 応答を待つ上限（ミリ秒）
-    #[arg(long, default_value_t = 1000)]
-    timeout_ms: u64,
+struct ZoneArgs {
     /// 表示用のタイムゾーン（UTC からのずれ）
     #[arg(long, default_value = "+09:00", allow_hyphen_values = true)]
     tz: String,
     /// タイムゾーンの表示名
     #[arg(long, default_value = "JST")]
     tz_label: String,
+}
+
+impl ZoneArgs {
+    fn zone(&self) -> anyhow::Result<DisplayZone> {
+        let offset = DisplayZone::parse_offset(&self.tz).map_err(anyhow::Error::msg)?;
+        Ok(DisplayZone::new(offset, self.tz_label.clone()))
+    }
+}
+
+#[derive(Args)]
+struct TuiArgs {
+    /// NTP サーバ（例: 192.168.92.234 / 127.0.0.1:12300）。ポート省略時は 123
+    server: String,
+    /// ポーリング間隔（ミリ秒）
+    #[arg(long, default_value_t = 500)]
+    interval_ms: u64,
+    /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること）
+    #[arg(long)]
+    allow_fast_poll: bool,
+    /// 最上部の見出し
+    #[arg(long, default_value = "NTP CLOCK")]
+    title: String,
+    /// 最下部に出す一文（スポンサー表記など）
+    #[arg(long)]
+    footer: Option<String>,
+    #[command(flatten)]
+    zone: ZoneArgs,
+}
+
+#[derive(Args)]
+struct OnceArgs {
+    #[command(flatten)]
+    target: TargetArgs,
+    /// 応答を待つ上限（ミリ秒）
+    #[arg(long, default_value_t = 1000)]
+    timeout_ms: u64,
+    #[command(flatten)]
+    zone: ZoneArgs,
 }
 
 #[derive(Args)]
@@ -113,15 +152,60 @@ fn main() -> ExitCode {
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     match cli.command {
+        Command::Tui(args) => run_tui(&args),
         Command::Once(args) => run_once(&args),
         Command::Stats(args) => run_stats(&args),
         Command::SimServer(args) => run_sim_server(&args),
     }
 }
 
+fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
+    let zone = args.zone.zone()?;
+    let server = resolve(&args.server)?;
+    let interval = Duration::from_millis(args.interval_ms.max(10));
+    if !args.allow_fast_poll {
+        polling_policy::check_interval(server.ip(), interval)?;
+    }
+    // 同期スレッドと UI は必ず同じ時計インスタンスを使う。
+    // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let transport =
+        UdpTransport::connect(server, Arc::clone(&clock)).context("UDP ソケットを開けません")?;
+    let mut service = SyncService::new(
+        SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
+        transport,
+        RandomNonce::new(),
+        Arc::clone(&clock),
+        RequestTemplate::default(),
+    );
+
+    // 同期は別スレッドで回し、スナップショットだけをチャネルで UI に渡す（集約は共有しない）
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let sync_thread = thread::Builder::new()
+        .name("ntp-sync".into())
+        .spawn({
+            let stop = Arc::clone(&stop);
+            move || service.run_until(&mut SnapshotSender::new(tx), None, &stop)
+        })
+        .context("同期スレッドを起動できません")?;
+
+    let config = TuiConfig {
+        title: args.title.clone(),
+        server_label: args.server.trim().to_string(),
+        footer: args.footer.clone(),
+        zone,
+    };
+    let result = tui::run(&config, clock, rx);
+
+    stop.store(true, Ordering::Relaxed);
+    let _ = sync_thread.join();
+    result.context("端末の表示でエラーが起きました")?;
+    Ok(ExitCode::SUCCESS)
+}
+
 fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
-    let offset = DisplayZone::parse_offset(&args.tz).map_err(anyhow::Error::msg)?;
-    let zone = DisplayZone::new(offset, args.tz_label.clone());
+    let zone = args.zone.zone()?;
     let server = resolve(&args.target.server)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let transport =
