@@ -19,3 +19,5 @@ pub(super) const WARN: Color = Color::LightYellow;
 pub(super) const BAD: Color = Color::LightRed;
 /// 最下部の一文
 pub(super) const FOOTER: Color = Color::Yellow;
+/// 測定値の推移の棒（大きい時計の色と分ける）
+pub(super) const TREND: Color = Color::Cyan;

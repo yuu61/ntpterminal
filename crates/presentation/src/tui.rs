@@ -1,7 +1,7 @@
-//! TUI: 大きい時計と情報欄。
+//! TUI: 大きい時計・情報欄・測定値の推移。
 //!
 //! 同期は別スレッドの `SyncService` が行う。ここではチャネルで届く [`SyncSnapshot`] を受け取り、
-//! 毎フレーム描き直すだけで、集約には触らない。
+//! 毎フレーム描き直すだけで、集約には触らない（推移のグラフ用に、届いた測定値を表示側で貯める）。
 //!
 //! [`SyncSnapshot`]: application::snapshot::SyncSnapshot
 
@@ -10,6 +10,7 @@ mod big_digits;
 mod screen;
 mod snapshot_sender;
 mod theme;
+mod trend;
 
 pub use app::run;
 pub use snapshot_sender::SnapshotSender;
@@ -28,6 +29,8 @@ pub struct TuiConfig {
     pub server_label: String,
     /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない
     pub footer: Option<String>,
+    /// 測定値の推移のグラフを出すか（既定では出さない）
+    pub trend: bool,
     pub zone: DisplayZone,
     /// 送信方式の表示名（"UDP ソケット" / "raw-ip（…）"）
     pub transport: String,
