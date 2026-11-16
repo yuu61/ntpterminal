@@ -9,7 +9,7 @@
 //! - 時計のずれの見込みは、周波数の推定値があれば推定の残り（15 ppm）、なければ上限（500 ppm）
 //! - さらに 1 ms の余裕を取る（表示は 1 ms 単位なので、それより小さい段差は追いかけなくてよい）
 //!
-//! 食い違った標本が 1 つだけなら一時的な外れとみなして使わない。判断は [`super::TimeSource`] が行う。
+//! 食い違った標本が 1 つだけなら一時的な外れとみなして使わない。判断は [`super::ClockTracker`] が行う。
 
 use super::{Anchor, FrequencyOffset, Sample};
 use crate::shared_kernel::TimeDelta;

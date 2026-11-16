@@ -1,5 +1,6 @@
 //! 読み取り用モデル: 表示側（CLI / TUI）が集約を直接触らずに済むようにする。
 
+use domain::ptp_clock::{PhcSource, PhcState, PhcStats, PtpStatus};
 use domain::receiver::ReceiverStatus;
 use domain::shared_kernel::{PcTime, TimeDelta};
 use domain::time_sync::{
@@ -26,6 +27,44 @@ pub struct SyncSnapshot {
     pub last_success: Option<PcTime>,
     pub next_poll: Option<PcTime>,
     pub awaiting_reply: bool,
+}
+
+/// ptp4l が合わせる PHC（[`PhcSource`]）の状態。問い合わせのたびに別スレッド（TUI）へ渡す。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PhcSnapshot {
+    pub state: PhcState,
+    pub stats: PhcStats,
+    pub poll_interval: TimeDelta,
+    /// 大きい時計の基準点（ptp4l が同期を知らせるまでは `None`）
+    pub anchor: Option<Anchor>,
+    pub last_sample: Option<Sample>,
+    pub selected_sample: Option<Sample>,
+    pub frequency: Option<FrequencyOffset>,
+    /// 最後に読めた ptp4l の状態。直近の問い合わせが失敗しても残るので、`status_error` も見ること
+    pub status: Option<PtpStatus>,
+    /// 直近の ptp4l への問い合わせの失敗。読めたら `None` に戻る
+    pub status_error: Option<String>,
+    pub last_success: Option<PcTime>,
+    pub next_poll: PcTime,
+}
+
+impl PhcSnapshot {
+    #[must_use]
+    pub fn capture(source: &PhcSource) -> Self {
+        Self {
+            state: source.state(),
+            stats: source.stats(),
+            poll_interval: source.poll_interval(),
+            anchor: source.anchor(),
+            last_sample: source.last_sample(),
+            selected_sample: source.selected_sample(),
+            frequency: source.frequency(),
+            status: source.status().cloned(),
+            status_error: source.status_error().map(str::to_owned),
+            last_success: source.last_success(),
+            next_poll: source.next_poll(),
+        }
+    }
 }
 
 /// 受信機の監視（[`crate::usecase::ReceiverMonitor`]）の状態。問い合わせのたびに TUI へ渡す。

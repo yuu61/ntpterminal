@@ -28,6 +28,8 @@ use application::timestamping::TimestampingStatus;
 use domain::packet_crafting::{EthernetSpec, HeaderTemplate, MacAddr};
 
 #[cfg(target_os = "linux")]
+pub(crate) use hardware_ts::interface_phc;
+#[cfg(target_os = "linux")]
 pub use link::LinkTransport;
 #[cfg(target_os = "linux")]
 pub use raw_ip::RawIpTransport;

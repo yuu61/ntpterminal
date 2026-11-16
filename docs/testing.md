@@ -93,3 +93,57 @@ NIC で無効だったときは `（一時的に有効化）` が付き、終了
 e1000e は、NIC の送信が off のままソケットにハードウェアの送信時刻を頼むと、1 秒待って
 `clearing Tx timestamp hang` をカーネルのログに出す。確かめた後に `journalctl -k | grep -i hang` と
 `ethtool -S eth0 | grep hwtstamp` で増えていないことも見る。決まりごとの詳細は `transport/hardware_ts.rs` の先頭。
+
+## ptp4l が合わせる PHC（`--ptp4l`）
+
+ptp4l とのやりとり・状態の決め方・表示は、模擬 ptp4l と模擬 PHC を使うテスト
+（`crates/application/tests/phc_service.rs`）と、実際の Unix ドメインソケットを使うテスト
+（`crates/infrastructure/tests/ptp4l_socket.rs`。Linux・root 不要）で確かめている。
+
+### 本物の ptp4l と PHC（Linux・root）
+
+本物の ptp4l に問い合わせる確認と、PHC を読む確認は `#[ignore]` のテスト（`crates/infrastructure/tests/ptp4l_real.rs`）に
+してある。ハードウェアのタイムスタンプの NIC がなくても、ネットワーク名前空間を 2 つ veth でつなぎ、ソフトウェアの
+タイムスタンプの ptp4l をマスタとスレーブで動かせば、管理メッセージの読み書きは確かめられる（ホストの LAN には何も流れない）。
+`free_running 1` で時計を合わせないようにする（合わせないので、スレーブは SLAVE にならず UNCALIBRATED で止まる）。
+
+```sh
+sudo ip netns add ptp-m; sudo ip netns add ptp-s
+sudo ip link add ptp-vm type veth peer name ptp-vs
+sudo ip link set ptp-vm netns ptp-m; sudo ip link set ptp-vs netns ptp-s
+sudo ip -n ptp-m addr add 10.99.0.1/24 dev ptp-vm; sudo ip -n ptp-m link set ptp-vm up
+sudo ip -n ptp-s addr add 10.99.0.2/24 dev ptp-vs; sudo ip -n ptp-s link set ptp-vs up
+# 設定ファイル（どちらも [global] に time_stamping software・free_running 1・domainNumber 24 と、別々の
+# uds_address・uds_ro_address を書く。マスタは serverOnly 1、スレーブは clientOnly 1）
+sudo ip netns exec ptp-m ptp4l -i ptp-vm -f m.cfg -m &
+sudo ip netns exec ptp-s ptp4l -i ptp-vs -f s.cfg -m &
+# 管理用ソケットの応答は抽象名前空間の名前（ネットワーク名前空間ごと）に届くので、ptp4l と同じ名前空間で動かす
+cargo test -p ntpterminal-infrastructure --test ptp4l_real --no-run   # 表示された実行ファイルを ↓ で動かす
+sudo ip netns exec ptp-s env NTPTERMINAL_PTP4L_SOCKET=<スレーブの uds_address> NTPTERMINAL_PTP_DOMAIN=24 \
+    <実行ファイル> --ignored --nocapture reads_a_real_ptp4l
+sudo ip netns exec ptp-s pmc -u -b 0 -d 24 -s <スレーブの uds_address> 'GET CURRENT_DATA_SET' 'GET PARENT_DATA_SET'
+sudo env NTPTERMINAL_PHC=0 <実行ファイル> --ignored --nocapture reads_a_real_phc   # /dev/ptp0 を読む
+```
+
+テストが出す値（ポートの状態・マスタとの差・経路遅延・グランドマスタ・clockClass・UTC との差・時刻系）を、
+`pmc` の表示と見比べる。ソフトウェアのタイムスタンプの ptp4l は PHC を使わないので、`ntpterminal once --ptp4l` は
+「ソフトウェアのタイムスタンプで動いています」のエラーになる（それが正しい）。WSL2 には Hyper-V の PHC
+（`/dev/ptp0`）があり、`PTP_SYS_OFFSET_PRECISE` と `_EXTENDED` には対応していないので、`PTP_SYS_OFFSET` で読む。
+
+### 実機（ハードウェアのタイムスタンプの ptp4l）
+
+PHC を使う ptp4l を動かし、`once`・`stats`・`tui` で確かめる。
+
+```sh
+sudo ptp4l -i eth0 -m                                  # 別の端末で（ハードウェアのタイムスタンプ）
+sudo pmc -u -b 0 'GET PORT_DATA_SET' 'GET TIME_STATUS_NP'
+sudo ntpterminal --config /dev/null once --ptp4l
+sudo ntpterminal --config /dev/null stats --ptp4l --count 20
+sudo ntpterminal --config /dev/null tui --ptp4l --trend
+```
+
+`once` の「マスタとの差」「経路遅延」「グランドマスタ」が `pmc` の値と合い、「PC との差」が `phc2sys` などで
+PC の時計を合わせていればほぼ 0 になることを確かめる。ptp4l は起動すると NIC のタイムスタンプの設定
+（`ethtool --get-hwtimestamp-cfg eth0`）を変え、終了しても戻さない。PTP のマルチキャストのグループにも参加し、
+マスタが見つからなければ自分がマスタになって Announce・Sync を送る（`clientOnly 1` で防げる）。
+共用のネットワークで試すときは、先に影響を確かめておく。

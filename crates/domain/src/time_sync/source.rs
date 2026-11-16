@@ -1,18 +1,15 @@
 //! 集約ルート [`TimeSource`]（時刻源 = サーバ 1 台）。
 //!
-//! - 採用した標本は、それまでの基準点と同じ時間の流れに乗っているか確かめてから使う（`continuity`）。
-//!   食い違う標本は保留し、次の標本もそれと合えば時刻の段差とみなして、それまでの標本を捨てる。
-//!   次の標本が元の流れに合えば、保留した標本は一時的な外れとして使わない
+//! - 採用した標本から基準点を作る処理（段差の確認・クロックフィルタ・周波数の推定）は [`ClockTracker`] が行う
 //! - 次に問い合わせる時刻は、前回の予定の時刻から数える（起きるのが遅れた分を次に持ち越さない。
 //!   Windows の待ちは 15.6 ms 刻みなので、送った時刻から数えると間隔が毎回延びる）。
 //!   1 回分以上遅れたときは、送った時刻から数え直す（遅れを取り戻すために続けて送らない）
 
 use core::ops::RangeInclusive;
 
-use super::continuity::{is_continuous, residual};
 use super::{
-    Anchor, ClockFilter, FrequencyEstimator, FrequencyOffset, KissCode, LeapIndicator, ReferenceId,
-    RejectReason, Sample, ServerInfo, ServerReply, Stratum, SyncEvent, SyncState,
+    Anchor, ClockTracker, FrequencyOffset, KissCode, LeapIndicator, ReferenceId, RejectReason,
+    Sample, ServerInfo, ServerReply, Stratum, SyncEvent, SyncState,
 };
 use crate::shared_kernel::{LocalStamp, NtpTimestamp, PcTime, TimeDelta};
 
@@ -90,11 +87,7 @@ pub struct TimeSource {
     state: SyncState,
     next_poll: Option<PcTime>,
     pending: Option<PendingExchange>,
-    filter: ClockFilter,
-    frequency: FrequencyEstimator,
-    /// それまでの基準点と食い違った標本。次の標本で、時刻の段差か一時的な外れかを確かめる
-    suspect: Option<Sample>,
-    anchor: Option<Anchor>,
+    tracker: ClockTracker,
     last_sample: Option<Sample>,
     server_info: Option<ServerInfo>,
     last_success: Option<PcTime>,
@@ -112,10 +105,7 @@ impl TimeSource {
             state: SyncState::Unsynchronized,
             next_poll: Some(now),
             pending: None,
-            filter: ClockFilter::new(config.filter_len),
-            frequency: FrequencyEstimator::new(),
-            suspect: None,
-            anchor: None,
+            tracker: ClockTracker::new(config.filter_len),
             last_sample: None,
             server_info: None,
             last_success: None,
@@ -150,7 +140,7 @@ impl TimeSource {
     /// 大きい時計の表示に使う基準点（クロックフィルタが選んだ標本から作る）。
     #[must_use]
     pub const fn anchor(&self) -> Option<Anchor> {
-        self.anchor
+        self.tracker.anchor()
     }
 
     #[must_use]
@@ -161,13 +151,13 @@ impl TimeSource {
     /// クロックフィルタが選んだ標本（直近の中で「往復遅延の半分 + 古さ × 15 ppm」が最小）。
     #[must_use]
     pub fn selected_sample(&self) -> Option<Sample> {
-        self.filter.best().copied()
+        self.tracker.selected()
     }
 
     /// サーバの時計がモノトニック時計より速く進む割合の推定値。まだ推定できていなければ `None`。
     #[must_use]
     pub const fn frequency(&self) -> Option<FrequencyOffset> {
-        self.frequency.estimate()
+        self.tracker.frequency()
     }
 
     #[must_use]
@@ -313,39 +303,10 @@ impl TimeSource {
         events
     }
 
-    /// 標本を基準点の計算に取り込む。それまでの標本と食い違うときは保留し、次の標本で確かめる。
+    /// 標本を基準点の計算に取り込む。時刻の段差を確かめたら知らせる。
     fn track(&mut self, sample: Sample, events: &mut Vec<SyncEvent>) {
-        let frequency = self.frequency.estimate();
-        let current = self.filter.best().copied();
-        if current.is_none_or(|best| is_continuous(&best, &sample, frequency)) {
-            self.suspect = None;
-            self.adopt(sample);
-            return;
-        }
-        match self.suspect.take() {
-            // 2 回続けて食い違い、その 2 つは互いに合っている: 時刻が段差で変わった
-            Some(previous) if is_continuous(&previous, &sample, frequency) => {
-                let step = current
-                    .and_then(|best| residual(&best, &sample, frequency.unwrap_or_default()))
-                    .unwrap_or_default();
-                self.filter.clear();
-                self.frequency.reset();
-                self.adopt(previous);
-                self.adopt(sample);
-                events.push(SyncEvent::ClockStepDetected { step });
-            }
-            // 1 回目の食い違い（または、保留していた標本とも合わない）: 保留して、まだ使わない
-            Some(_) | None => self.suspect = Some(sample),
-        }
-    }
-
-    /// 標本をクロックフィルタと周波数の推定に入れ、基準点を作り直す。
-    fn adopt(&mut self, sample: Sample) {
-        self.filter.push(sample);
-        self.frequency.observe(&sample);
-        let frequency = self.frequency.estimate().unwrap_or_default();
-        if let Some(Ok(anchor)) = self.filter.best().map(Anchor::from_sample) {
-            self.anchor = Some(anchor.with_frequency(frequency));
+        if let Some(step) = self.tracker.track(sample) {
+            events.push(SyncEvent::ClockStepDetected { step });
         }
     }
 
@@ -831,7 +792,7 @@ mod tests {
             projected.wrapping_since(now.wall),
             TimeDelta::from_millis(-300),
         );
-        assert_eq!(src.filter.len(), 2, "段差の前の標本は捨てる");
+        assert_eq!(src.tracker.len(), 2, "段差の前の標本は捨てる");
     }
 
     #[test]

@@ -7,6 +7,9 @@ extern crate alloc;
 
 pub mod clock;
 pub mod nonce;
+#[cfg(target_os = "linux")]
+mod phc;
+pub mod ptp4l;
 pub mod resolve;
 pub mod sim_server;
 pub mod transport;

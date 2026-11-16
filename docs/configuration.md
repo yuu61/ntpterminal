@@ -14,6 +14,7 @@ ntpterminal tui 192.168.1.123
 ntpterminal tui 192.168.1.123 --interval-ms 200 --trend --title "GNSS TIME SERVER"
 ntpterminal stats --count 0 --json 127.0.0.1:12300
 ntpterminal once --transport raw-ip --dscp 46 192.168.1.123
+ntpterminal tui --ptp4l
 ntpterminal sim-server --offset-ms -0.978 --refid GNSS
 ```
 
@@ -22,8 +23,8 @@ ntpterminal sim-server --offset-ms -0.978 --refid GNSS
   （`ntpterminal --interval-ms 200 tui` はエラーになる）
 - 値を取るオプションは `--interval-ms 200` と `--interval-ms=200` のどちらの形でも書ける
 - 問い合わせるサーバは、オプションの前後どちらに書いてもよい（`tui`・`once`・`stats` のみ）。
-  設定ファイルに `server` を書いてあれば省略できる
-- `--trend`・`--json`・`--no-df`・`--allow-fast-poll` は値を取らないフラグで、付けると有効になる
+  設定ファイルに `server` を書いてあれば省略できる。`--ptp4l` のときはサーバを指定しない
+- `--trend`・`--json`・`--no-df`・`--ptp4l`・`--allow-fast-poll` は値を取らないフラグで、付けると有効になる
   （`--trend=true` のように値を付けるとエラーになる）
 - 負の値はそのまま書ける（`--offset-ms -0.978`、`--tz -05:00`）
 - 空白を含む値は、シェルの引用符で囲む（`--footer "Sponsored by ..."`）
@@ -64,7 +65,7 @@ trend = true
 - 共通の項目はファイルの先頭（セクションの外）に書き、特定のコマンドだけで使う項目は
   `[tui]`・`[once]`・`[stats]`・`[sim-server]` の各セクションに書く。TOML ではセクションの後に書いたキーは
   そのセクションに属するため、たとえば `[tui]` の後に `server` を書くとエラーになる
-- フラグの項目（`trend`、`json`、`no-df`）は、設定ファイルで `true` にするとコマンドラインから `false` に戻せない。
+- フラグの項目（`trend`、`json`、`no-df`、`ptp4l`）は、設定ファイルで `true` にするとコマンドラインから `false` に戻せない。
   コマンドラインには、これらを有効にするオプションしかないためである
 - 未知のキー（綴りの誤りを含む）や、値の型・範囲・形式の誤りは、行と列を示したうえで起動時にエラーとする
 - 項目どうしの組み合わせ（`udp` での `dscp` や、`snmp-community` なしの `snmp-port` など）は、コマンドラインの値と
@@ -111,12 +112,25 @@ trend = true
 | `--vlan`        | `vlan`        | 0〜4094                                  | タグなし                  | 802.1Q の VLAN ID                              |
 | `--pcp`         | `pcp`         | 0〜7                                     | 0                         | 802.1Q の優先度（PCP）。`--vlan` を指定しない場合は VLAN ID 0 の優先度タグを付ける |
 
+次の項目は、NTP サーバの代わりに ptp4l（linuxptp）が合わせる NIC の時計（PHC）を表示するときに使う
+（[usage.md](usage.md#ptp4l-が合わせる-phc-の時刻) を参照）。Linux 専用で、root 権限が必要。
+`--ptp4l` のときは、サーバ・送信方式の項目（`--transport` など上の表のもの）・`--snmp-*`・`--allow-fast-poll` を
+指定するとエラーになる。逆に `--ptp4l-socket`・`--ptp-domain`・`--phc` は `--ptp4l` なしで指定するとエラーになる
+（どちらも設定ファイルの値を含む）。
+
+| オプション       | 設定ファイル   | 値                                       | 既定値 | 説明                                           |
+|------------------|----------------|------------------------------------------|--------|------------------------------------------------|
+| `--ptp4l`        | `ptp4l`        | フラグ                                   | 無効   | NTP サーバの代わりに、ptp4l が合わせる PHC の時刻を表示する |
+| `--ptp4l-socket` | `ptp4l-socket` | パス                                     | `/var/run/ptp/ptp4l`、なければ `/var/run/ptp4l` | ptp4l の管理用ソケット（ptp4l の `uds_address`）。読み取り専用のソケット（`uds_ro_address`）は使えない |
+| `--ptp-domain`   | `ptp-domain`   | 0〜255                                   | 0      | ptp4l のドメイン番号（`domainNumber`）。違うと ptp4l は応答しない |
+| `--phc`          | `phc`          | `/dev/ptp0` の形か、インターフェース名   | ptp4l が使う PHC | 表示する PHC。ptp4l が複数の PHC を使うとき（ポートごとに別の NIC など）だけ指定が要る |
+
 ### tui（設定ファイルでは `[tui]`）
 
 | オプション           | 設定ファイル       | 値          | 既定値      | 説明                                                         |
 |----------------------|--------------------|-------------|-------------|--------------------------------------------------------------|
 | `--interval-ms`      | `interval-ms`      | ミリ秒      | 500         | 問い合わせの間隔。10 未満を指定すると 10 になる（公開サーバに対する制限は後述） |
-| `--title`            | `title`            | 文字列      | `NTP CLOCK` | 画面最上部の見出し                                           |
+| `--title`            | `title`            | 文字列      | `NTP CLOCK`（`--ptp4l` のときは `PTP CLOCK`） | 画面最上部の見出し                                           |
 | `--footer`           | `footer`           | 文字列      | なし        | 画面最下部に表示する文（スポンサー表記など）                 |
 | `--trend`            | `trend`            | フラグ      | 無効        | 推移のグラフを表示する。時計が小さくならない大きさの端末でのみ表示される |
 | `--snmp-community`   | `snmp-community`   | 文字列      | なし        | 指定すると、GNSS 受信機の状態を SNMP v2c で取得する。コミュニティ名は画面に表示しない |
@@ -131,7 +145,7 @@ trend = true
 
 | オプション     | 設定ファイル | 値     | 既定値 | 説明                       |
 |----------------|--------------|--------|--------|----------------------------|
-| `--timeout-ms` | `timeout-ms` | ミリ秒 | 1000   | 応答を待つ時間の上限       |
+| `--timeout-ms` | `timeout-ms` | ミリ秒 | 1000   | 応答を待つ時間の上限（`--ptp4l` では ptp4l の応答を 1 回待つ上限） |
 | `--json`       | `json`       | フラグ | 無効   | 結果を JSON 形式で出力する |
 
 ### stats（設定ファイルでは `[stats]`）

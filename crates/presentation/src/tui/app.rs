@@ -10,11 +10,11 @@ use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{CompletedFrame, DefaultTerminal};
 
 use application::port::ClockPort;
-use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
+use application::snapshot::ReceiverSnapshot;
 use domain::time_sync::DisplayClock;
 
 use super::trend::SampleHistory;
-use super::{TuiConfig, screen};
+use super::{SourceSnapshot, TuiConfig, screen};
 
 /// 1 フレームの長さ（約 60fps）。
 const FRAME_INTERVAL: Duration = Duration::from_millis(16);
@@ -23,7 +23,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 ///
 /// `clock` には同期スレッド（と受信機の監視スレッド）と**同じインスタンス**を渡すこと。モノトニック時計の起点が
 /// 違うと、時刻基準のチェックでは検出できないまま基準点からの計算が狂う。
-/// `receiver` は受信機の監視のスナップショット（`config.receiver` のときだけ渡す）。
+/// `receiver` は受信機の監視のスナップショット（NTP の時刻源で、受信機を読むときだけ渡す）。
 ///
 /// # Errors
 ///
@@ -31,7 +31,7 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 pub fn run(
     config: &TuiConfig,
     clock: &dyn ClockPort,
-    snapshots: &Receiver<SyncSnapshot>,
+    snapshots: &Receiver<SourceSnapshot>,
     receiver: Option<&Receiver<ReceiverSnapshot>>,
 ) -> io::Result<()> {
     let mut terminal = match ratatui::try_init() {
@@ -50,10 +50,10 @@ fn event_loop(
     terminal: &mut DefaultTerminal,
     config: &TuiConfig,
     clock: &dyn ClockPort,
-    snapshots: &Receiver<SyncSnapshot>,
+    snapshots: &Receiver<SourceSnapshot>,
     receiver: Option<&Receiver<ReceiverSnapshot>>,
 ) -> io::Result<()> {
-    let mut latest: Option<SyncSnapshot> = None;
+    let mut latest: Option<SourceSnapshot> = None;
     let mut latest_receiver: Option<ReceiverSnapshot> = None;
     let mut history = SampleHistory::default();
     let mut display = DisplayClock::new();
@@ -71,12 +71,8 @@ fn event_loop(
             }
         }
         let now = clock.now().mono;
-        let shown = display.tick(
-            latest
-                .as_ref()
-                .and_then(|snapshot| snapshot.anchor.as_ref()),
-            now,
-        );
+        let anchor = latest.as_ref().and_then(SourceSnapshot::anchor);
+        let shown = display.tick(anchor.as_ref(), now);
         let model = screen::build(
             config,
             latest.as_ref(),

@@ -16,25 +16,30 @@ use core::time::Duration;
 use std::fs;
 use std::io::{self, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::ExitCode;
+use std::process::{self, ExitCode};
 use std::sync::mpsc;
 use std::thread;
 
 use anyhow::Context as _;
 use application::acl::mib::MibProfile;
 use application::polling_policy;
-use application::port::ClockPort;
+use application::port::{ClockPort, PacketPort, PhcPort};
 use application::snapshot::ReceiverSnapshot;
 use application::timestamping::TimestampingStatus;
-use application::usecase::{ReceiverMonitor, ReceiverMonitorConfig, SyncService, query_once};
+use application::usecase::{
+    PhcRequest, PhcService, Ptp4lClient, Ptp4lClientConfig, ReceiverMonitor, ReceiverMonitorConfig,
+    SyncService, query_once, select_phc,
+};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::packet_crafting::{
     EthernetSpec, HeaderTemplate, Ipv4Spec, MacAddr, RequestTemplate, UdpChecksum, VlanTag,
 };
+use domain::ptp_clock::PhcConfig;
 use domain::shared_kernel::TimeDelta;
 use domain::time_sync::SourceConfig;
 use infrastructure::clock::SystemClock;
 use infrastructure::nonce::RandomNonce;
+use infrastructure::ptp4l;
 use infrastructure::resolve::resolve_server;
 use infrastructure::sim_server::{SimServer, SimServerConfig, SimSnmpAgent};
 use infrastructure::transport::{
@@ -42,9 +47,12 @@ use infrastructure::transport::{
     TransportOptions, UdpTransport,
 };
 use presentation::cli::once;
+use presentation::cli::phc::{self, PhcStatsReporter, PhcTarget};
 use presentation::cli::stats::StatsReporter;
 use presentation::format::{DisplayZone, timestamping_label};
-use presentation::tui::{self, SnapshotSender, TuiConfig};
+use presentation::tui::{
+    self, PhcSnapshotSender, SnapshotSender, SourceSnapshot, TuiConfig, TuiSource,
+};
 use serde::Deserialize;
 
 use crate::config::ConfigFile;
@@ -70,6 +78,11 @@ const MIN_SNMP_INTERVAL_MS: u64 = 1000;
 /// SNMP の GET で応答を待つ上限（ミリ秒）
 const SNMP_TIMEOUT_MS: u64 = 1000;
 const DEFAULT_SIM_SNMP_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 16100);
+/// `--ptp4l` のときの見出し
+const DEFAULT_PTP_TITLE: &str = "PTP CLOCK";
+const DEFAULT_PTP_DOMAIN: u8 = 0;
+/// tui / stats で ptp4l の応答を待つ上限（ミリ秒）。ptp4l は同じホストなので、ふつうは 1 ms もかからない
+const PTP4L_TIMEOUT_MS: u64 = 200;
 
 // ---- 値の範囲（コマンドラインと設定ファイルの両方で確かめる） ----
 /// DSCP（6 bit）
@@ -114,6 +127,70 @@ struct TargetArgs {
     /// 結果を JSON で出力する
     #[arg(long)]
     json: bool,
+}
+
+/// ptp4l が合わせる PHC を表示する指定（tui / once / stats）。
+#[derive(Args, Clone)]
+struct PtpArgs {
+    /// NTP サーバの代わりに、ptp4l（linuxptp）が合わせる NIC の時計（PHC）の時刻を表示する（Linux のみ・root が必要）
+    #[arg(long)]
+    ptp4l: bool,
+    /// --ptp4l のみ: ptp4l の管理用ソケット（既定: /var/run/ptp/ptp4l、なければ /var/run/ptp4l）
+    #[arg(long, value_name = "PATH")]
+    ptp4l_socket: Option<PathBuf>,
+    /// --ptp4l のみ: ptp4l のドメイン番号（既定: 0）
+    #[arg(long)]
+    ptp_domain: Option<u8>,
+    /// --ptp4l のみ: 表示する PHC（/dev/ptpN か、ptp4l のポートのインターフェース名）。ptp4l が複数の PHC を使うときに指定する
+    #[arg(long, value_name = "PHC", value_parser = parse_phc)]
+    phc: Option<PhcRequest>,
+}
+
+impl PtpArgs {
+    /// 一緒に使えない指定をエラーにする（黙って無視しない）。`--ptp4l` のときは NTP サーバと `ntp_only`
+    /// （NTP サーバに問い合わせるときだけの指定。名前と、指定したか）を、そうでないときは `--ptp4l` だけの指定を確かめる。
+    fn check(&self, server: Option<&str>, ntp_only: &[(&'static str, bool)]) -> anyhow::Result<()> {
+        if self.ptp4l {
+            anyhow::ensure!(
+                server.is_none(),
+                "--ptp4l と NTP サーバ（引数か、設定ファイルの server）は一緒に指定できません"
+            );
+            if let Some(&(name, _)) = ntp_only.iter().find(|&&(_, given)| given) {
+                anyhow::bail!(
+                    "{name} は NTP サーバに問い合わせるときの指定で、--ptp4l とは一緒に使えません（設定ファイルの値も含む）"
+                );
+            }
+            return Ok(());
+        }
+        let ptp_only = [
+            ("--ptp4l-socket", self.ptp4l_socket.is_some()),
+            ("--ptp-domain", self.ptp_domain.is_some()),
+            ("--phc", self.phc.is_some()),
+        ];
+        if let Some(&(name, _)) = ptp_only.iter().find(|&&(_, given)| given) {
+            anyhow::bail!("{name} は --ptp4l と一緒に指定してください");
+        }
+        Ok(())
+    }
+}
+
+/// `--phc` の値: `/dev/ptpN` なら PHC の番号、それ以外は ptp4l のポートのインターフェース名。
+fn parse_phc(text: &str) -> Result<PhcRequest, String> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return Err("PHC は /dev/ptpN かインターフェース名で指定してください".to_owned());
+    }
+    trimmed.strip_prefix("/dev/ptp").map_or_else(
+        || Ok(PhcRequest::Interface(trimmed.to_owned())),
+        |number| {
+            number
+                .parse::<u32>()
+                .map(PhcRequest::Index)
+                .map_err(|error| {
+                    format!("PHC は /dev/ptp0 の形で指定してください: {trimmed}（{error}）")
+                })
+        },
+    )
 }
 
 #[derive(Args)]
@@ -197,6 +274,25 @@ struct TransportArgs {
 }
 
 impl TransportArgs {
+    /// 送受信の項目と、それを指定したか（`--ptp4l` と一緒に使えないものを知らせるため）。
+    fn given(&self) -> Vec<(&'static str, bool)> {
+        vec![
+            ("--transport", self.mode.is_some()),
+            ("--timestamping", self.timestamping.is_some()),
+            ("--source-port", self.source_port.is_some()),
+            ("--ttl", self.ttl.is_some()),
+            ("--dscp", self.dscp.is_some()),
+            ("--ecn", self.ecn.is_some()),
+            ("--ip-id", self.ip_id.is_some()),
+            ("--no-df", self.no_df),
+            ("--udp-checksum", self.udp_checksum.is_some()),
+            ("--ip-checksum", self.ip_checksum.is_some()),
+            ("--dst-mac", self.dst_mac.is_some()),
+            ("--vlan", self.vlan.is_some()),
+            ("--pcp", self.pcp.is_some()),
+        ]
+    }
+
     fn mode(&self) -> TransportMode {
         match self.mode.unwrap_or_default() {
             ModeArg::Udp => TransportMode::Udp,
@@ -353,6 +449,16 @@ struct SnmpArgs {
 }
 
 impl SnmpArgs {
+    /// SNMP の項目と、それを指定したか（`--ptp4l` と一緒に使えないものを知らせるため）。
+    const fn given(&self) -> [(&'static str, bool); 4] {
+        [
+            ("--snmp-community", self.community.is_some()),
+            ("--snmp-port", self.port.is_some()),
+            ("--snmp-interval-ms", self.interval_ms.is_some()),
+            ("--snmp-mib", self.mib.is_some()),
+        ]
+    }
+
     /// 受信機を読む宛先と設定。`--snmp-community` がなければ `None`（読まない）。
     ///
     /// # Errors
@@ -453,6 +559,8 @@ struct TuiArgs {
     zone: ZoneArgs,
     #[command(flatten)]
     transport: TransportArgs,
+    #[command(flatten)]
+    ptp: PtpArgs,
 }
 
 #[derive(Args)]
@@ -466,6 +574,8 @@ struct OnceArgs {
     zone: ZoneArgs,
     #[command(flatten)]
     transport: TransportArgs,
+    #[command(flatten)]
+    ptp: PtpArgs,
 }
 
 #[derive(Args)]
@@ -483,6 +593,8 @@ struct StatsArgs {
     allow_fast_poll: bool,
     #[command(flatten)]
     transport: TransportArgs,
+    #[command(flatten)]
+    ptp: PtpArgs,
 }
 
 #[derive(Args)]
@@ -548,39 +660,92 @@ fn load_config_if_exists(path: &Path) -> anyhow::Result<ConfigFile> {
 }
 
 fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
-    let zone = args.zone.zone();
+    let mut ntp_only = args.transport.given();
+    ntp_only.extend(args.snmp.given());
+    ntp_only.push(("--allow-fast-poll", args.allow_fast_poll));
+    args.ptp.check(args.server.as_deref(), &ntp_only)?;
+    let interval = polling_interval(args.interval_ms);
+    // 同期スレッド・受信機の監視スレッドと UI は必ず同じ時計インスタンスを使う。
+    // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    // 同期は別スレッドで回し、スナップショットだけをチャネルで UI に渡す（集約は共有しない）
+    let (tx, rx) = mpsc::channel();
+    let stop = Arc::new(AtomicBool::new(false));
+    let started = if args.ptp.ptp4l {
+        start_phc(args, &clock, interval, tx, &stop)?
+    } else {
+        start_ntp(args, &clock, interval, tx, &stop)?
+    };
+    let config = TuiConfig {
+        title: args
+            .title
+            .clone()
+            .unwrap_or_else(|| started.default_title.to_owned()),
+        server_label: started.label,
+        footer: args.footer.clone(),
+        trend: args.trend,
+        zone: args.zone.zone(),
+        source: started.source,
+    };
+    let result = tui::run(
+        &config,
+        clock.as_ref(),
+        &rx,
+        started.receiver.as_ref().map(|monitor| &monitor.0),
+    );
+
+    stop.store(true, Ordering::Relaxed);
+    drop(started.sync_thread.join());
+    if let Some((_, monitor_thread)) = started.receiver {
+        drop(monitor_thread.join());
+    }
+    result.context("端末の表示でエラーが起きました")?;
+    Ok(ExitCode::SUCCESS)
+}
+
+/// TUI に渡す時刻源を始めた結果（同期スレッドと、受信機の監視）。
+struct StartedSource {
+    source: TuiSource,
+    /// 見出しの下に出す名前
+    label: String,
+    /// `--title` がないときの見出し
+    default_title: &'static str,
+    sync_thread: thread::JoinHandle<()>,
+    receiver: Option<(mpsc::Receiver<ReceiverSnapshot>, thread::JoinHandle<()>)>,
+}
+
+/// NTP サーバへの問い合わせ（と、指定があれば受信機の監視）を別スレッドで始める。
+fn start_ntp(
+    args: &TuiArgs,
+    clock: &Arc<dyn ClockPort>,
+    interval: Duration,
+    tx: mpsc::Sender<SourceSnapshot>,
+    stop: &Arc<AtomicBool>,
+) -> anyhow::Result<StartedSource> {
     let server_text = required_server(args.server.as_deref())?;
     let server = resolve(server_text)?;
-    let interval = polling_interval(args.interval_ms);
     if !args.allow_fast_poll {
         polling_policy::check_interval(server.ip(), interval)?;
     }
     let receiver = args.snmp.monitor(server)?;
-    // 同期スレッド・受信機の監視スレッドと UI は必ず同じ時計インスタンスを使う。
-    // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
-    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
     let OpenedTransport {
         port: transport,
         description: transport_label,
     } = args
         .transport
-        .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
+        .open(server, Arc::clone(clock), Arc::clone(&timestamping))?;
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,
         RandomNonce::new(),
-        Arc::clone(&clock),
+        Arc::clone(clock),
         RequestTemplate::default(),
     );
-
-    // 同期は別スレッドで回し、スナップショットだけをチャネルで UI に渡す（集約は共有しない）
-    let (tx, rx) = mpsc::channel();
-    let stop = Arc::new(AtomicBool::new(false));
     let sync_thread = thread::Builder::new()
         .name("ntp-sync".into())
         .spawn({
-            let thread_stop = Arc::clone(&stop);
+            let thread_stop = Arc::clone(stop);
             move || service.run_until(&mut SnapshotSender::new(tx), None, &thread_stop)
         })
         .context("同期スレッドを起動できません")?;
@@ -588,39 +753,114 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         Some((target, monitor_config)) => Some(spawn_receiver_monitor(
             target,
             monitor_config,
-            Arc::clone(&clock),
-            &stop,
+            Arc::clone(clock),
+            stop,
         )?),
         None => None,
     };
+    Ok(StartedSource {
+        source: TuiSource::Ntp {
+            receiver: receiver_monitor.is_some(),
+            transport: transport_label,
+            timestamping,
+        },
+        label: server_text.trim().to_owned(),
+        default_title: DEFAULT_TITLE,
+        sync_thread,
+        receiver: receiver_monitor,
+    })
+}
 
-    let config = TuiConfig {
-        title: args
-            .title
-            .clone()
-            .unwrap_or_else(|| DEFAULT_TITLE.to_owned()),
-        server_label: server_text.trim().to_owned(),
-        footer: args.footer.clone(),
-        trend: args.trend,
-        receiver: receiver_monitor.is_some(),
-        zone,
-        transport: transport_label,
-        timestamping,
-    };
-    let result = tui::run(
-        &config,
-        clock.as_ref(),
-        &rx,
-        receiver_monitor.as_ref().map(|monitor| &monitor.0),
+/// ptp4l が合わせる PHC の読み取りを別スレッドで始める。
+fn start_phc(
+    args: &TuiArgs,
+    clock: &Arc<dyn ClockPort>,
+    interval: Duration,
+    tx: mpsc::Sender<SourceSnapshot>,
+    stop: &Arc<AtomicBool>,
+) -> anyhow::Result<StartedSource> {
+    let (mut service, target) = open_ptp4l(
+        &args.ptp,
+        clock,
+        interval,
+        Duration::from_millis(PTP4L_TIMEOUT_MS),
+    )?;
+    let sync_thread = thread::Builder::new()
+        .name("ptp4l-phc".into())
+        .spawn({
+            let thread_stop = Arc::clone(stop);
+            move || service.run_until(&mut PhcSnapshotSender::new(tx), None, &thread_stop)
+        })
+        .context("同期スレッドを起動できません")?;
+    Ok(StartedSource {
+        label: target.ptp4l_label(),
+        source: TuiSource::Phc {
+            phc: target.phc,
+            ports: target.ports,
+        },
+        default_title: DEFAULT_PTP_TITLE,
+        sync_thread,
+        receiver: None,
+    })
+}
+
+/// ptp4l が合わせる PHC の同期サービス（PHC と ptp4l の管理用ソケットは、どちらも実行時に開く）。
+type Ptp4lPhcService = PhcService<Box<dyn PhcPort>, Box<dyn PacketPort>>;
+
+/// ptp4l につなぎ、ポートの一覧から表示する PHC を決めて開く。
+fn open_ptp4l(
+    ptp: &PtpArgs,
+    clock: &Arc<dyn ClockPort>,
+    interval: Duration,
+    timeout: Duration,
+) -> anyhow::Result<(Ptp4lPhcService, PhcTarget)> {
+    let connection = ptp4l::connect(ptp.ptp4l_socket.as_deref(), Arc::clone(clock))
+        .context("ptp4l につなげません（ソケットの場所は --ptp4l-socket で指定できます）")?;
+    let domain = ptp.ptp_domain.unwrap_or(DEFAULT_PTP_DOMAIN);
+    let mut client = Ptp4lClient::new(
+        connection.port,
+        Arc::clone(clock),
+        Ptp4lClientConfig {
+            domain,
+            timeout,
+            client_id: process::id(),
+        },
     );
-
-    stop.store(true, Ordering::Relaxed);
-    drop(sync_thread.join());
-    if let Some((_, monitor_thread)) = receiver_monitor {
-        drop(monitor_thread.join());
+    let ports = client
+        .discover_ports()
+        .context(
+            "ptp4l のポートを読めません（ドメイン番号は --ptp-domain、ソケットは --ptp4l-socket で指定できます）",
+        )?;
+    let selected = select_phc(&ports, ptp.phc.as_ref(), ptp4l::interface_phc)
+        .context("表示する PHC を決められません（--phc で指定できます）")?;
+    let opened = ptp4l::open_phc(selected.index, Arc::clone(clock)).context("PHC を開けません")?;
+    let mut notes = Vec::new();
+    if selected.vclock {
+        notes.push("仮想 PHC");
     }
-    result.context("端末の表示でエラーが起きました")?;
-    Ok(ExitCode::SUCCESS)
+    if selected.from_interface {
+        notes.push("インターフェースから特定");
+    }
+    notes.push(opened.method);
+    let target = PhcTarget {
+        socket: connection.path.display().to_string(),
+        domain,
+        phc: format!("{}（{}）", opened.path, notes.join("・")),
+        ports: selected
+            .ports
+            .iter()
+            .copied()
+            .zip(selected.interfaces.iter().cloned())
+            .collect(),
+    };
+    let service = PhcService::new(
+        PhcConfig::with_poll_interval(TimeDelta::from_std(interval)),
+        opened.port,
+        client,
+        selected.ports,
+        Arc::clone(clock),
+    );
+    Ok((service, target))
 }
 
 /// 受信機の監視を別スレッドで始める。SNMP は `--transport` などの指定に関係なく、ふつうの UDP ソケットで送る。
@@ -649,6 +889,11 @@ fn spawn_receiver_monitor(
 }
 
 fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
+    args.ptp
+        .check(args.target.server.as_deref(), &args.transport.given())?;
+    if args.ptp.ptp4l {
+        return run_once_phc(args);
+    }
     let zone = args.zone.zone();
     let server = resolve(required_server(args.target.server.as_deref())?)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
@@ -710,7 +955,59 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     }
 }
 
+/// `once --ptp4l`: ptp4l の状態と PHC を 1 回読む。ptp4l が同期を知らせていなければ、読めても終了コード 1。
+fn run_once_phc(args: &OnceArgs) -> anyhow::Result<ExitCode> {
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let timeout = Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS));
+    let (mut service, target) = open_ptp4l(
+        &args.ptp,
+        &clock,
+        Duration::from_millis(DEFAULT_INTERVAL_MS),
+        timeout,
+    )?;
+    match service.poll_once() {
+        Ok(snapshot) => {
+            if args.target.json {
+                writeln!(
+                    io::stdout().lock(),
+                    "{}",
+                    phc::render_once_json(&target, &snapshot)
+                )?;
+            } else {
+                write!(
+                    io::stdout().lock(),
+                    "{}",
+                    phc::render_once_text(&target, &snapshot, &args.zone.zone())
+                )?;
+            }
+            Ok(if snapshot.state.shows_time() {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            })
+        }
+        Err(error) if args.target.json => {
+            writeln!(
+                io::stdout().lock(),
+                "{}",
+                phc::render_once_error_json(&target, &error.to_string())
+            )?;
+            Ok(ExitCode::FAILURE)
+        }
+        Err(error) => {
+            writeln!(io::stderr().lock(), "{}: {error}", target.phc)?;
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
 fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
+    let mut ntp_only = args.transport.given();
+    ntp_only.push(("--allow-fast-poll", args.allow_fast_poll));
+    args.ptp.check(args.target.server.as_deref(), &ntp_only)?;
+    if args.ptp.ptp4l {
+        return run_stats_phc(args);
+    }
     let server = resolve(required_server(args.target.server.as_deref())?)?;
     let interval = polling_interval(args.interval_ms);
     let count = args.count.unwrap_or(DEFAULT_COUNT);
@@ -740,6 +1037,31 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     }
     reporter.write_header(interval, &transport_label);
     service.run(&mut reporter, (count > 0).then_some(count));
+    reporter.write_summary();
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `stats --ptp4l`: ptp4l の状態と PHC を一定間隔で読み続け、統計を出す。
+fn run_stats_phc(args: &StatsArgs) -> anyhow::Result<ExitCode> {
+    let interval = polling_interval(args.interval_ms);
+    let count = args.count.unwrap_or(DEFAULT_COUNT);
+    let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+    let (mut service, target) = open_ptp4l(
+        &args.ptp,
+        &clock,
+        interval,
+        Duration::from_millis(PTP4L_TIMEOUT_MS),
+    )?;
+    let mut reporter = PhcStatsReporter::new(io::stdout().lock(), target, args.target.json);
+    if count == 0 {
+        reporter = reporter.with_periodic_summary(20);
+    }
+    reporter.write_header(interval.as_millis());
+    service.run_until(
+        &mut reporter,
+        (count > 0).then_some(count),
+        &Arc::new(AtomicBool::new(false)),
+    );
     reporter.write_summary();
     Ok(ExitCode::SUCCESS)
 }

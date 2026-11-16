@@ -10,22 +10,22 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
 use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
-use application::timestamping::TimestampSource;
+use application::timestamping::{TimestampSource, TimestampingStatus};
 use domain::shared_kernel::{NtpTimestamp, PcTime, TimeDelta};
 use domain::time_sync::SyncState;
 
-use super::TuiConfig;
 use super::big_digits::{self, BigText};
 use super::trend::{self, SampleHistory, Trend};
-use super::{receiver, theme};
+use super::{SourceSnapshot, TuiConfig, TuiSource, phc, receiver, theme};
 use crate::format::{
-    format_clock, format_date, format_delay_ms, format_offset_ms, state_label, timestamping_label,
+    DisplayZone, format_clock, format_date, format_delay_ms, format_offset_ms, state_label,
+    timestamping_label,
 };
 
 /// 同期前の時計の表示。
 const CLOCK_PLACEHOLDER: &str = "--:--:--.---";
 /// 値がまだないときの表示。
-const NO_VALUE: &str = "--";
+pub(super) const NO_VALUE: &str = "--";
 /// 状態の前に付ける印。
 /// 注意: `●` は East Asian Ambiguous。端末の「曖昧幅」が半角（既定）であることを前提にしている。
 const STATUS_MARK: &str = "●";
@@ -60,20 +60,45 @@ pub(crate) struct ScreenModel {
 /// - `history`: 推移のグラフに使う、これまでの測定値（`config.trend` のときだけ使う）
 /// - `shown`: 大きい時計に出す時刻（[`domain::time_sync::DisplayClock`] の結果）
 /// - `now`: モノトニック時計の現在値（「何秒前」「何秒後」の計算に使う）
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "設定の文字列などを借りるには、参照のまま照合するしかない（ref は ref_patterns で禁止）"
+)]
 pub(super) fn build(
     config: &TuiConfig,
-    snapshot: Option<&SyncSnapshot>,
+    snapshot: Option<&SourceSnapshot>,
     receiver: Option<&ReceiverSnapshot>,
     history: &SampleHistory,
     shown: Option<NtpTimestamp>,
     now: PcTime,
 ) -> ScreenModel {
-    let state = snapshot.map_or(SyncState::Unsynchronized, |snap| snap.state);
-    let (status, status_color) = match state {
-        SyncState::Synchronized => (state_label(state).to_owned(), theme::GOOD),
-        SyncState::Unsynchronized => ("応答待ち（未同期）".to_owned(), theme::LABEL),
-        SyncState::Holdover => (state_label(state).to_owned(), theme::WARN),
-        SyncState::Denied => (state_label(state).to_owned(), theme::BAD),
+    let ((status, status_color), rows) = match &config.source {
+        TuiSource::Ntp {
+            receiver: with_receiver,
+            transport,
+            timestamping,
+        } => {
+            let ntp = snapshot.and_then(SourceSnapshot::ntp);
+            (
+                ntp_status(ntp),
+                info_rows(
+                    ntp,
+                    *with_receiver,
+                    receiver,
+                    transport,
+                    timestamping,
+                    &config.zone,
+                    now,
+                ),
+            )
+        }
+        TuiSource::Phc {
+            phc: description,
+            ports,
+        } => {
+            let snap = snapshot.and_then(SourceSnapshot::phc);
+            (phc::status(snap), phc::rows(snap, description, ports, now))
+        }
     };
     ScreenModel {
         title: config.title.clone(),
@@ -86,7 +111,7 @@ pub(super) fn build(
         zone_label: config.zone.label().to_owned(),
         status,
         status_color,
-        rows: info_rows(config, snapshot, receiver, now),
+        rows,
         trends: if config.trend {
             trend::trends(history)
         } else {
@@ -96,11 +121,25 @@ pub(super) fn build(
     }
 }
 
-/// 受信機の行（`config.receiver` のとき）は、基準時計に関わる「Ref ID」の後ろに置く。
+/// NTP の状態の行の文言と色。
+fn ntp_status(snapshot: Option<&SyncSnapshot>) -> (String, Color) {
+    let state = snapshot.map_or(SyncState::Unsynchronized, |snap| snap.state);
+    match state {
+        SyncState::Synchronized => (state_label(state).to_owned(), theme::GOOD),
+        SyncState::Unsynchronized => ("応答待ち（未同期）".to_owned(), theme::LABEL),
+        SyncState::Holdover => (state_label(state).to_owned(), theme::WARN),
+        SyncState::Denied => (state_label(state).to_owned(), theme::BAD),
+    }
+}
+
+/// NTP の情報欄。受信機の行（`show_receiver` のとき）は、基準時計に関わる「Ref ID」の後ろに置く。
 fn info_rows(
-    config: &TuiConfig,
     snapshot: Option<&SyncSnapshot>,
+    show_receiver: bool,
     receiver: Option<&ReceiverSnapshot>,
+    transport: &str,
+    timestamping: &TimestampingStatus,
+    zone: &DisplayZone,
     now: PcTime,
 ) -> Vec<InfoRow> {
     // offset と delay は、基準点と同じ「クロックフィルタが選んだ標本」の値を出す（生の値は揺れる）
@@ -150,7 +189,7 @@ fn info_rows(
             theme::TEXT,
         ),
     ];
-    if config.receiver {
+    if show_receiver {
         rows.extend(receiver::rows(receiver, now));
     }
     rows.extend([
@@ -161,7 +200,7 @@ fn info_rows(
         ),
         row(
             "サーバ時刻",
-            last.map(|sample| format_clock(sample.server_transmit(), &config.zone)),
+            last.map(|sample| format_clock(sample.server_transmit(), zone)),
             theme::TEXT,
         ),
         row(
@@ -178,9 +217,9 @@ fn info_rows(
             snapshot.map(|snap| format!("{}/{}", snap.stats.successes, snap.stats.attempts)),
             theme::TEXT,
         ),
-        row("送信方式", Some(config.transport.clone()), theme::LABEL),
+        row("送信方式", Some(transport.to_owned()), theme::LABEL),
         {
-            let counts = config.timestamping.counts();
+            let counts = timestamping.counts();
             // カーネルかハードウェアの時刻が、設定どおりに取れているときだけ「良好」の色にする
             let color = if counts.last_source != TimestampSource::User
                 && counts.last_source == counts.expected_source()
@@ -200,7 +239,7 @@ fn info_rows(
 }
 
 /// ずれの大きさで色を変える（1ms 未満: 良好、10ms 未満: 注意、それ以上: 異常）。
-fn tone(delta: TimeDelta) -> Color {
+pub(super) fn tone(delta: TimeDelta) -> Color {
     let abs = delta.abs();
     if abs < TimeDelta::from_millis(1) {
         theme::GOOD
@@ -364,10 +403,14 @@ fn render_info_rows(rows: &[InfoRow], area: Rect, mut y: u16, buf: &mut Buffer) 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::format::{DisplayZone, display_width};
+    use crate::format::display_width;
     use alloc::sync::Arc;
     use application::acl::mib::MibProfile;
-    use application::timestamping::TimestampingStatus;
+    use application::snapshot::PhcSnapshot;
+    use domain::ptp_clock::{
+        ClockIdentity, ClockQuality, LeapWarning, PhcState, PhcStats, PortState, PortStatus,
+        PtpStatus, TimeProperties, TimeSourceKind, Timescale,
+    };
     use domain::receiver::{ReceiverState, ReceiverStatus, SatelliteCounts};
     use domain::shared_kernel::LocalStamp;
     use domain::time_sync::{
@@ -388,9 +431,11 @@ mod tests {
             footer: footer.map(str::to_owned),
             zone: DisplayZone::jst(),
             trend: false,
-            receiver: false,
-            transport: "UDP ソケット".into(),
-            timestamping: Arc::new(TimestampingStatus::new()),
+            source: TuiSource::Ntp {
+                receiver: false,
+                transport: "UDP ソケット".into(),
+                timestamping: Arc::new(TimestampingStatus::new()),
+            },
         }
     }
 
@@ -496,7 +541,7 @@ mod tests {
             .unwrap();
         let model = build(
             &config(None),
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &SampleHistory::default(),
             Some(shown),
@@ -555,7 +600,7 @@ mod tests {
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
         let model = build(
             &with_trend(config(Some("Sponsored by Example Inc."))),
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &recent_history(),
             Some(shown),
@@ -612,7 +657,7 @@ mod tests {
         let config = config(Some("footer"));
         let model = build(
             &config,
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &recent_history(),
             Some(shown),
@@ -631,7 +676,7 @@ mod tests {
         let config = with_trend(config(Some("footer")));
         let with = build(
             &config,
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &recent_history(),
             Some(shown),
@@ -639,7 +684,7 @@ mod tests {
         );
         let without = build(
             &config,
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &SampleHistory::default(),
             Some(shown),
@@ -668,7 +713,7 @@ mod tests {
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
         let model = build(
             &with_trend(config(Some("footer"))),
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             None,
             &recent_history(),
             Some(shown),
@@ -724,12 +769,16 @@ mod tests {
             ..ReceiverSnapshot::default()
         };
         let with_receiver = TuiConfig {
-            receiver: true,
+            source: TuiSource::Ntp {
+                receiver: true,
+                transport: "UDP ソケット".into(),
+                timestamping: Arc::new(TimestampingStatus::new()),
+            },
             ..config(Some("footer"))
         };
         let model = build(
             &with_receiver,
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             Some(&receiver),
             &SampleHistory::default(),
             Some(shown),
@@ -753,13 +802,152 @@ mod tests {
         // 既定（--snmp-community なし）では出さない
         let without = build(
             &config(None),
-            Some(&snapshot),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
             Some(&receiver),
             &SampleHistory::default(),
             Some(shown),
             now,
         );
         assert!(!without.rows.iter().any(|row| row.label == "GNSS 受信機"));
+    }
+
+    /// ptp4l の状態（ポート 1 つ）と、PHC の読み取りのスナップショット。
+    fn phc_snapshot(state: PhcState, port_state: PortState) -> PhcSnapshot {
+        let synced = synced_snapshot();
+        let sample = synced.last_sample.unwrap();
+        PhcSnapshot {
+            state,
+            stats: PhcStats {
+                attempts: 120,
+                readings: 120,
+                status_updates: 120,
+                ..PhcStats::default()
+            },
+            poll_interval: TimeDelta::from_millis(500),
+            anchor: state.shows_time().then_some(synced.anchor).flatten(),
+            last_sample: Some(sample),
+            selected_sample: Some(sample),
+            frequency: None,
+            status: Some(PtpStatus {
+                domain: 0,
+                ports: vec![PortStatus {
+                    number: 1,
+                    state: port_state,
+                }],
+                offset_from_master: TimeDelta::from_nanos(-12),
+                mean_path_delay: TimeDelta::from_nanos(1_234),
+                steps_removed: 1,
+                grandmaster: ClockIdentity([0xEC, 0x46, 0x70, 0xFF, 0xFE, 0, 0, 1]),
+                grandmaster_quality: ClockQuality {
+                    class: 6,
+                    accuracy: 0x21,
+                    variance: 0x4E5D,
+                },
+                time: TimeProperties {
+                    utc_offset: 37,
+                    utc_offset_valid: true,
+                    timescale: Timescale::Ptp,
+                    leap: LeapWarning::None,
+                    time_traceable: true,
+                    frequency_traceable: true,
+                    time_source: TimeSourceKind::Gnss,
+                },
+            }),
+            status_error: None,
+            last_success: synced.last_success,
+            next_poll: seven_seconds_later(),
+        }
+    }
+
+    fn phc_config() -> TuiConfig {
+        TuiConfig {
+            title: "PTP CLOCK".into(),
+            server_label: "/var/run/ptp4l（ドメイン 0）".into(),
+            source: TuiSource::Phc {
+                phc: "/dev/ptp0（同時読み取り）".into(),
+                ports: vec![(1, "eno1".to_owned())],
+            },
+            ..config(Some("footer"))
+        }
+    }
+
+    #[test]
+    fn phc_rows_fit_with_the_big_clock_on_80x24() {
+        let snapshot = phc_snapshot(PhcState::Synchronized, PortState::Slave);
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let model = build(
+            &phc_config(),
+            Some(&SourceSnapshot::Phc(Box::new(snapshot))),
+            None,
+            &SampleHistory::default(),
+            Some(shown),
+            now,
+        );
+        assert_eq!(model.status, "同期済み（SLAVE）");
+        assert_eq!(model.status_color, theme::GOOD);
+        let value = |label: &str| {
+            model
+                .rows
+                .iter()
+                .find(|row| row.label == label)
+                .map(|row| row.value.clone())
+                .unwrap()
+        };
+        assert_eq!(value("マスタとの差"), "-12 ns");
+        assert_eq!(value("経路遅延"), "1234 ns");
+        assert_eq!(value("グランドマスタ"), "ec4670.fffe.000001");
+        assert_eq!(value("Clock class"), "6（基準に同期）");
+        assert_eq!(value("UTC との差"), "37 秒");
+        assert_eq!(value("PC との差"), "-0.978 ms（PHC − PC）");
+        assert_eq!(value("ポート"), "eno1 SLAVE");
+        assert_eq!(value("成功/試行"), "120/120");
+
+        let lines = render_text(&model, 80, 24);
+        // 目視確認用: cargo test -p ntpterminal-presentation phc_rows_fit -- --nocapture
+        println!("{}", lines.join("\n"));
+        assert!(lines.iter().any(|line| line.contains('█')));
+        assert!(lines.join("\n").contains("footer"));
+    }
+
+    #[test]
+    fn phc_status_tells_why_the_clock_is_hidden() {
+        let listening = phc_snapshot(PhcState::Acquiring, PortState::Listening);
+        assert_eq!(listening.anchor, None);
+        let model = build(
+            &phc_config(),
+            Some(&SourceSnapshot::Phc(Box::new(listening))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(model.clock, CLOCK_PLACEHOLDER);
+        assert_eq!(model.status, "マスタを探しています（LISTENING）");
+
+        let mut lost = phc_snapshot(PhcState::Holdover, PortState::Slave);
+        lost.status_error = Some("ptp4l から CURRENT_DATA_SET の応答がありません".to_owned());
+        let holdover = build(
+            &phc_config(),
+            Some(&SourceSnapshot::Phc(Box::new(lost))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(holdover.status, "自走中（ptp4l の応答なし）");
+        assert_eq!(holdover.status_color, theme::WARN);
+
+        let waiting = build(
+            &phc_config(),
+            None,
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        assert_eq!(waiting.status, "ptp4l の応答待ち");
+        assert!(waiting.rows.iter().any(|row| row.value == NO_VALUE));
     }
 
     #[test]

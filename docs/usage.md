@@ -10,6 +10,8 @@
 | `sim-server` | 開発用の疑似 NTP サーバ（`--snmp-mib` を付けると疑似 SNMP エージェントも起動） |
 
 サーバは `192.168.1.123`、`ntp.example.com`、`127.0.0.1:12300` のように指定する。ポートを省略すると 123 を使う。
+`tui`・`once`・`stats` は、NTP サーバの代わりに ptp4l が合わせる NIC の時計（PHC）も表示できる
+（[ptp4l が合わせる PHC の時刻](#ptp4l-が合わせる-phc-の時刻)）。
 すべてのオプションは `ntpterminal <コマンド> --help` で確認できる。コマンドライン引数と設定ファイルの書き方、
 全項目の一覧は [configuration.md](configuration.md) を参照。
 
@@ -131,6 +133,61 @@ Microchip SyncServer S650 の MIB である。既定（`--snmp-mib auto`）で�
 衛星数の数え方（受信良好・可視・追尾中など）はメーカーによって異なるため、種類ごとに分けて表示する。
 MIB ごとの対応は [acl/mib.rs](../crates/application/src/acl/mib.rs) の先頭にまとめてある。
 疑似 SNMP エージェントで試す手順は [testing.md](testing.md#gnss-受信機の行snmpを確かめる) を参照。
+
+## ptp4l が合わせる PHC の時刻
+
+`--ptp4l` を付けると、NTP サーバの代わりに、ptp4l（linuxptp）が PTP で合わせている NIC の時計（PHC）の時刻を表示する。
+Linux のみで、root 権限が必要（PHC の `/dev/ptpN` と、ptp4l の管理用ソケットを使うため）。ptp4l は同じホストで、
+ハードウェアのタイムスタンプを使って動いていること。
+
+```sh
+sudo ntpterminal tui --ptp4l
+sudo ntpterminal once --ptp4l --ptp-domain 24
+sudo ntpterminal stats --ptp4l --count 0 --ptp4l-socket /var/run/ptp4l
+```
+
+- ptp4l の状態は、ptp4l の管理用ソケット（`pmc -u` と同じ）で読む。場所は既定では `/var/run/ptp/ptp4l`、
+  なければ `/var/run/ptp4l` で、ほかの場所なら `--ptp4l-socket` で指定する。読み取り専用のソケット
+  （`uds_ro_address`）は、ポートの一覧に答えないので使えない
+- ptp4l は、ドメイン番号が自分の設定と違う問い合わせに答えない。0 以外なら `--ptp-domain` で指定する。
+  gPTP の設定（`transportSpecific 1`）の ptp4l には対応していない
+- 問い合わせは ptp4l の中だけで処理させ、ネットワークへは転送させない（`pmc` の `-b 0` と同じ）
+- ptp4l と同じネットワーク名前空間で動かす（コンテナなどで名前空間が違うと、ptp4l の応答が届かない）
+- 表示する PHC は、ptp4l が知らせるもの（仮想 PHC を含む）を使う。ptp4l が複数の PHC を使うときだけ、
+  `--phc /dev/ptp1` か `--phc eth1`（ポートのインターフェース名）で選ぶ。ptp4l がソフトウェアのタイムスタンプ
+  （`-S`）で動いているときは PHC を使っていないので、エラーになる
+- PHC の時刻は PTP の時刻系（TAI）なので、ptp4l が知らせる UTC との差（currentUtcOffset、いまは 37 秒）を引いて
+  表示する。グランドマスタがその値を確かなものとして知らせていなければ、情報欄に「（未確定）」と出す。
+  時刻系が ARB（任意）なら換算せずにそのまま表示する
+- `--transport` などの送信方式の指定・`--snmp-*`・`--allow-fast-poll` とサーバの指定は、一緒に使えない（エラーになる）
+
+### 状態と時計
+
+PHC だけでは同期しているかどうか分からないので、ptp4l のポートの状態で決める。
+ptp4l が同期を知らせるまでは、大きい時計は `--:--:--.---` のままにする（合わせられていない PHC は任意の時刻で進む）。
+
+| 状態の表示                         | ptp4l のポートの状態                  | 時計                     |
+|------------------------------------|---------------------------------------|--------------------------|
+| ptp4l の応答待ち / ptp4l の応答なし | （まだ読めていない）                  | 出さない                 |
+| マスタを探しています               | LISTENING・INITIALIZING・PASSIVE など | 出さない                 |
+| マスタに合わせています             | UNCALIBRATED                          | 出さない                 |
+| 同期済み                           | SLAVE（どれかのポート）               | 出す                     |
+| マスタとして動作中                 | MASTER・GRAND_MASTER                  | 出す（この PHC が基準）  |
+| 自走中                             | 一度同期した後に上のどれでもなくなった・ptp4l の応答がない | 出し続ける |
+| ポートが使えません                 | FAULTY・DISABLED                      | 出さない                 |
+
+自走中は、ptp4l が最後に合わせた速さで進む PHC をそのまま読み続ける。ptp4l の応答がなくても PHC は読み続け、
+最後に読めた UTC との差で換算する。
+
+### 情報欄
+
+マスタとの差（ptp4l の offsetFromMaster）・経路遅延（meanPathDelay）・グランドマスタ・Clock class・時刻源・
+UTC との差・うるう秒・PC との差（PHC − PC。PC の時計の合い方の確認用）・ポート・PHC・最終取得・成功/試行を表示する。
+マスタとの差は、1 µs 未満なら緑、100 µs 未満なら黄、それ以上なら赤で表示する。`--trend` を付けると、
+推移のグラフにはマスタとの差と経路遅延を出す。
+
+`once --ptp4l` は 1 回読んだ結果を出し、ptp4l が同期を知らせていなければ（時計を出さない状態なら）読めても
+終了コード 1 で終わる。`stats --ptp4l` は読むたびに PC との差・マスタとの差・経路遅延を出し、最後に統計を出す。
 
 ## 公開 NTP サーバでは使わないこと
 

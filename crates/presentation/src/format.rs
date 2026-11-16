@@ -1,4 +1,6 @@
-//! 表示用の整形（日時・時間差・状態・文字幅）。
+//! 表示用の整形（日時・時間差・状態・文字幅）。ptp4l が合わせる PHC の表示用のものは [`ptp`]。
+
+pub mod ptp;
 
 use application::timestamping::{TimestampSource, TimestampingCounts};
 use domain::shared_kernel::{NtpTimestamp, TimeDelta};

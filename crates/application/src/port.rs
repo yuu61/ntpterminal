@@ -2,10 +2,11 @@
 
 use core::time::Duration;
 
+use domain::ptp_clock::{PhcEvent, PhcReading};
 use domain::shared_kernel::{LocalStamp, NtpTimestamp};
 use domain::time_sync::SyncEvent;
 
-use crate::snapshot::SyncSnapshot;
+use crate::snapshot::{PhcSnapshot, SyncSnapshot};
 
 pub trait ClockPort: Send + Sync {
     /// モノトニック時計と壁時計を続けて読む。
@@ -66,4 +67,29 @@ impl<P: PacketPort + ?Sized> PacketPort for Box<P> {
 /// ドメインイベントの通知先（CLI 出力・TUI・ログなど）。
 pub trait EventSink {
     fn publish(&mut self, event: &SyncEvent, snapshot: &SyncSnapshot);
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("{0}")]
+pub struct PhcReadError(pub String);
+
+/// NIC の時計（PHC）の読み取り。
+pub trait PhcPort: Send {
+    /// PHC を読む。前後に読んだ PC の時刻（モノトニック時計に写したもの）と一緒に返す。
+    ///
+    /// # Errors
+    ///
+    /// PHC を読めないとき、または PC の時計が飛んでモノトニック時計に写せないとき。
+    fn read(&mut self) -> Result<PhcReading, PhcReadError>;
+}
+
+impl<P: PhcPort + ?Sized> PhcPort for Box<P> {
+    fn read(&mut self) -> Result<PhcReading, PhcReadError> {
+        (**self).read()
+    }
+}
+
+/// PHC の時刻源のイベントの通知先。
+pub trait PhcEventSink {
+    fn publish(&mut self, event: &PhcEvent, snapshot: &PhcSnapshot);
 }

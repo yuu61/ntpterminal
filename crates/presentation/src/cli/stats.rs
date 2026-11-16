@@ -20,7 +20,7 @@ use crate::format::{
 
 /// 平均・標準偏差を逐次計算する（Welford 法）。
 #[derive(Clone, Copy, Debug, Default)]
-struct RunningStats {
+pub(super) struct RunningStats {
     count: u64,
     mean: f64,
     m2: f64,
@@ -29,7 +29,12 @@ struct RunningStats {
 }
 
 impl RunningStats {
-    fn push(&mut self, value: f64) {
+    /// 値の数。
+    pub(super) const fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub(super) fn push(&mut self, value: f64) {
         self.count += 1;
         if self.count == 1 {
             self.min = value;
@@ -359,7 +364,7 @@ fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
     )
 }
 
-fn describe(stats: &RunningStats, signed: bool) -> String {
+pub(super) fn describe(stats: &RunningStats, signed: bool) -> String {
     let value = |number: f64| {
         if signed {
             format!("{number:+.3}")
@@ -376,7 +381,7 @@ fn describe(stats: &RunningStats, signed: bool) -> String {
     )
 }
 
-fn stats_json(stats: &RunningStats) -> serde_json::Value {
+pub(super) fn stats_json(stats: &RunningStats) -> serde_json::Value {
     if stats.count == 0 {
         return serde_json::Value::Null;
     }
