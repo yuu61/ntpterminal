@@ -9,7 +9,7 @@ use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{CompletedFrame, DefaultTerminal};
 
 use application::port::ClockPort;
-use application::snapshot::SyncSnapshot;
+use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
 use domain::time_sync::DisplayClock;
 
 use super::trend::SampleHistory;
@@ -20,8 +20,9 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 
 /// TUI を動かす。q / Esc / Ctrl+C で終わる。
 ///
-/// `clock` には同期スレッドと**同じインスタンス**を渡すこと。モノトニック時計の起点が違うと、
-/// 時刻基準のチェックでは検出できないまま基準点からの計算が狂う。
+/// `clock` には同期スレッド（と受信機の監視スレッド）と**同じインスタンス**を渡すこと。モノトニック時計の起点が
+/// 違うと、時刻基準のチェックでは検出できないまま基準点からの計算が狂う。
+/// `receiver` は受信機の監視のスナップショット（`config.receiver` のときだけ渡す）。
 ///
 /// # Errors
 ///
@@ -30,6 +31,7 @@ pub fn run(
     config: &TuiConfig,
     clock: &dyn ClockPort,
     snapshots: &Receiver<SyncSnapshot>,
+    receiver: Option<&Receiver<ReceiverSnapshot>>,
 ) -> io::Result<()> {
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
@@ -38,7 +40,7 @@ pub fn run(
             return Err(error);
         }
     };
-    let result = event_loop(&mut terminal, config, clock, snapshots);
+    let result = event_loop(&mut terminal, config, clock, snapshots, receiver);
     let restored = ratatui::try_restore();
     result.and(restored)
 }
@@ -48,8 +50,10 @@ fn event_loop(
     config: &TuiConfig,
     clock: &dyn ClockPort,
     snapshots: &Receiver<SyncSnapshot>,
+    receiver: Option<&Receiver<ReceiverSnapshot>>,
 ) -> io::Result<()> {
     let mut latest: Option<SyncSnapshot> = None;
+    let mut latest_receiver: Option<ReceiverSnapshot> = None;
     let mut history = SampleHistory::default();
     let mut display = DisplayClock::new();
     let mut next_frame = Instant::now();
@@ -60,6 +64,11 @@ fn event_loop(
             history.observe(&snapshot);
             latest = Some(snapshot);
         }
+        if let Some(channel) = receiver {
+            while let Ok(snapshot) = channel.try_recv() {
+                latest_receiver = Some(snapshot);
+            }
+        }
         let now = clock.now().mono;
         let shown = display.tick(
             latest
@@ -67,7 +76,14 @@ fn event_loop(
                 .and_then(|snapshot| snapshot.anchor.as_ref()),
             now,
         );
-        let model = screen::build(config, latest.as_ref(), &history, shown, now);
+        let model = screen::build(
+            config,
+            latest.as_ref(),
+            latest_receiver.as_ref(),
+            &history,
+            shown,
+            now,
+        );
         let _: CompletedFrame<'_> =
             terminal.draw(|frame| frame.render_widget(&model, frame.area()))?;
 

@@ -30,7 +30,8 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 
 - 層は `domain`（I/O なし）← `application`（ユースケース・ポート）← `infrastructure` / `presentation`。
   組み立ては `src/main.rs` だけ。OS 固有のコードと `unsafe` は `infrastructure` だけに置く。
-- `domain` は時計を読まず、時刻は引数で受け取る。`time_sync` から `packet_crafting` を参照しない（翻訳は `application::acl`）。
+- `domain` は時計を読まず、時刻は引数で受け取る。`time_sync` から `packet_crafting` を、`receiver` から `snmp` を
+  参照しない（翻訳は `application::acl`）。
 - 時刻の 3 種類を混ぜない: サーバ時刻 `NtpTimestamp`、モノトニック `PcTime`（delay・基準点）、
   壁時計 `LocalStamp.wall`（offset の計算だけ）。カーネルなどの時刻は transport の中でモノトニックに写してから渡す。
 - 使えない指定の組み合わせは黙って無視せずエラーにする。実際に使えた方式を表示で偽らない。
@@ -41,4 +42,5 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 - 公開 NTP サーバに短い間隔で問い合わせない（手動の確認でも）。
 
 各部分の決まりごととその理由は、モジュール先頭のドキュメントコメントに書いてある
-（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`tui/big_digits.rs`）。
+（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`tui/big_digits.rs`、
+GNSS 受信機を SNMP で読む部分は `acl/mib.rs` と `usecase/receiver_monitor.rs`）。

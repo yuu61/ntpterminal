@@ -47,6 +47,15 @@
 # footer = "Sponsored by ..."
 # trend = true
 
+# GNSS 受信機の状態を SNMP v2c で読む（NTP サーバと同じホストに問い合わせる）。
+# snmp-community を書くと読む。ほかの snmp-* を snmp-community なしで書くとエラー
+# （コミュニティ名を書いたファイルは、ほかの人に読ませない）
+# snmp-community = "public"
+# snmp-port = 161
+# snmp-interval-ms = 5000
+# 読む MIB: auto（既定）/ meinberg-os / meinberg-ltng / meinberg-lt / microchip-s650
+# snmp-mib = "auto"
+
 [once]
 # timeout-ms = 1000
 # json = false
@@ -61,3 +70,6 @@
 # offset-ms = -0.978
 # stratum = 1
 # refid = "GNSS"
+# 疑似 SNMP エージェント（コミュニティ名は public）: meinberg-os / meinberg-ltng / meinberg-lt / microchip-s650
+# snmp-mib = "meinberg-ltng"
+# snmp-bind = "127.0.0.1:16100"

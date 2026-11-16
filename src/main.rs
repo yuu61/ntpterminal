@@ -21,10 +21,12 @@ use std::sync::mpsc;
 use std::thread;
 
 use anyhow::Context as _;
+use application::acl::mib::MibProfile;
 use application::polling_policy;
 use application::port::ClockPort;
+use application::snapshot::ReceiverSnapshot;
 use application::timestamping::TimestampingStatus;
-use application::usecase::{SyncService, query_once};
+use application::usecase::{ReceiverMonitor, ReceiverMonitorConfig, SyncService, query_once};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use domain::packet_crafting::{
     EthernetSpec, HeaderTemplate, Ipv4Spec, MacAddr, RequestTemplate, UdpChecksum, VlanTag,
@@ -34,10 +36,10 @@ use domain::time_sync::SourceConfig;
 use infrastructure::clock::SystemClock;
 use infrastructure::nonce::RandomNonce;
 use infrastructure::resolve::resolve_server;
-use infrastructure::sim_server::{SimServer, SimServerConfig};
+use infrastructure::sim_server::{SimServer, SimServerConfig, SimSnmpAgent};
 use infrastructure::transport::{
     self as transport_layer, LinkOptions, OpenedTransport, TimestampingMode, TransportMode,
-    TransportOptions,
+    TransportOptions, UdpTransport,
 };
 use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
@@ -61,6 +63,13 @@ const DEFAULT_SIM_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALH
 const DEFAULT_SIM_OFFSET_MS: f64 = 0.0;
 const DEFAULT_SIM_STRATUM: u8 = 1;
 const DEFAULT_SIM_REFID: &str = "SIM";
+const DEFAULT_SNMP_PORT: u16 = 161;
+const DEFAULT_SNMP_INTERVAL_MS: u64 = 5000;
+/// 受信機を読む間隔の下限（ミリ秒）。これより短い指定はこの値にする
+const MIN_SNMP_INTERVAL_MS: u64 = 1000;
+/// SNMP の GET で応答を待つ上限（ミリ秒）
+const SNMP_TIMEOUT_MS: u64 = 1000;
+const DEFAULT_SIM_SNMP_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 16100);
 
 // ---- 値の範囲（コマンドラインと設定ファイルの両方で確かめる） ----
 /// DSCP（6 bit）
@@ -265,6 +274,113 @@ fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
     }
 }
 
+/// 読む MIB。設定ファイルでの綴りは、コマンドラインの値と同じ（`meinberg-ltng` など）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum MibArg {
+    /// 応答する MIB を探す（Meinberg は新しい MIB から試す）
+    #[default]
+    Auto,
+    /// Meinberg MEINBERG-OS-MIB（meinbergOS の機器）
+    MeinbergOs,
+    /// Meinberg MBG-SNMP-LTNG-MIB（LANTIME の現行ファームウェア）
+    MeinbergLtng,
+    /// Meinberg MBG-SNMP-LT-MIB（旧 LANTIME の V5 系）
+    MeinbergLt,
+    /// Microchip SyncServer S650
+    MicrochipS650,
+}
+
+impl MibArg {
+    const fn profile(self) -> Option<MibProfile> {
+        match self {
+            Self::Auto => None,
+            Self::MeinbergOs => Some(MibProfile::MeinbergOs),
+            Self::MeinbergLtng => Some(MibProfile::MeinbergLtng),
+            Self::MeinbergLt => Some(MibProfile::MeinbergLt),
+            Self::MicrochipS650 => Some(MibProfile::MicrochipS650),
+        }
+    }
+}
+
+/// 疑似 SNMP エージェントが返す MIB（`auto` はない）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum SimMibArg {
+    /// Meinberg MEINBERG-OS-MIB
+    MeinbergOs,
+    /// Meinberg MBG-SNMP-LTNG-MIB
+    MeinbergLtng,
+    /// Meinberg MBG-SNMP-LT-MIB
+    MeinbergLt,
+    /// Microchip SyncServer S650
+    MicrochipS650,
+}
+
+impl SimMibArg {
+    const fn profile(self) -> MibProfile {
+        match self {
+            Self::MeinbergOs => MibProfile::MeinbergOs,
+            Self::MeinbergLtng => MibProfile::MeinbergLtng,
+            Self::MeinbergLt => MibProfile::MeinbergLt,
+            Self::MicrochipS650 => MibProfile::MicrochipS650,
+        }
+    }
+}
+
+/// GNSS 受信機の状態を SNMP v2c で読む指定（tui）。
+#[derive(Args, Clone)]
+struct SnmpArgs {
+    /// GNSS 受信機の状態を SNMP v2c で読むときのコミュニティ名。指定すると、NTP サーバと同じホストに問い合わせて受信機の行を出す（画面には出さない）
+    #[arg(
+        id = "snmp_community",
+        long = "snmp-community",
+        value_name = "COMMUNITY"
+    )]
+    community: Option<String>,
+    /// SNMP のポート（既定: 161。--snmp-community と一緒に指定する）
+    #[arg(id = "snmp_port", long = "snmp-port")]
+    port: Option<u16>,
+    /// 受信機を読む間隔（ミリ秒。既定: 5000、下限: 1000。--snmp-community と一緒に指定する）
+    #[arg(id = "snmp_interval_ms", long = "snmp-interval-ms")]
+    interval_ms: Option<u64>,
+    /// 読む MIB（既定: auto。--snmp-community と一緒に指定する）
+    #[arg(id = "snmp_mib", long = "snmp-mib", value_enum)]
+    mib: Option<MibArg>,
+}
+
+impl SnmpArgs {
+    /// 受信機を読む宛先と設定。`--snmp-community` がなければ `None`（読まない）。
+    ///
+    /// # Errors
+    ///
+    /// `--snmp-community` なしで、ほかの SNMP の指定があるとき（黙って無視しない）。
+    fn monitor(
+        &self,
+        server: SocketAddr,
+    ) -> anyhow::Result<Option<(SocketAddr, ReceiverMonitorConfig)>> {
+        let Some(community) = self.community.as_deref() else {
+            anyhow::ensure!(
+                self.port.is_none() && self.interval_ms.is_none() && self.mib.is_none(),
+                "--snmp-port・--snmp-interval-ms・--snmp-mib は --snmp-community と一緒に指定してください"
+            );
+            return Ok(None);
+        };
+        let target = SocketAddr::new(server.ip(), self.port.unwrap_or(DEFAULT_SNMP_PORT));
+        let config = ReceiverMonitorConfig {
+            community: community.as_bytes().to_vec(),
+            profile: self.mib.unwrap_or_default().profile(),
+            interval: Duration::from_millis(
+                self.interval_ms
+                    .unwrap_or(DEFAULT_SNMP_INTERVAL_MS)
+                    .max(MIN_SNMP_INTERVAL_MS),
+            ),
+            timeout: Duration::from_millis(SNMP_TIMEOUT_MS),
+        };
+        Ok(Some((target, config)))
+    }
+}
+
 /// NTP の Reference ID（4 文字以内の ASCII）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct RefId(String);
@@ -329,6 +445,8 @@ struct TuiArgs {
     #[arg(long)]
     trend: bool,
     #[command(flatten)]
+    snmp: SnmpArgs,
+    #[command(flatten)]
     zone: ZoneArgs,
     #[command(flatten)]
     transport: TransportArgs,
@@ -378,6 +496,12 @@ struct SimServerArgs {
     /// 応答に入れる Reference ID（4 文字以内の ASCII。既定: SIM）
     #[arg(long)]
     refid: Option<RefId>,
+    /// 疑似 SNMP エージェントも起動し、この MIB の GNSS 受信機の値を返す（コミュニティ名は public）
+    #[arg(long, value_enum)]
+    snmp_mib: Option<SimMibArg>,
+    /// 疑似 SNMP エージェントの待ち受けアドレス（既定: 127.0.0.1:16100。--snmp-mib と一緒に指定する）
+    #[arg(long)]
+    snmp_bind: Option<SocketAddr>,
 }
 
 fn main() -> ExitCode {
@@ -428,7 +552,8 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
     if !args.allow_fast_poll {
         polling_policy::check_interval(server.ip(), interval)?;
     }
-    // 同期スレッドと UI は必ず同じ時計インスタンスを使う。
+    let receiver = args.snmp.monitor(server)?;
+    // 同期スレッド・受信機の監視スレッドと UI は必ず同じ時計インスタンスを使う。
     // モノトニック時計の起点（作成時の Instant）が違うと、基準点からの計算が黙って狂う
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
@@ -456,6 +581,15 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
             move || service.run_until(&mut SnapshotSender::new(tx), None, &thread_stop)
         })
         .context("同期スレッドを起動できません")?;
+    let receiver_monitor = match receiver {
+        Some((target, monitor_config)) => Some(spawn_receiver_monitor(
+            target,
+            monitor_config,
+            Arc::clone(&clock),
+            &stop,
+        )?),
+        None => None,
+    };
 
     let config = TuiConfig {
         title: args
@@ -465,16 +599,50 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         server_label: server_text.trim().to_owned(),
         footer: args.footer.clone(),
         trend: args.trend,
+        receiver: receiver_monitor.is_some(),
         zone,
         transport: transport_label,
         timestamping,
     };
-    let result = tui::run(&config, clock.as_ref(), &rx);
+    let result = tui::run(
+        &config,
+        clock.as_ref(),
+        &rx,
+        receiver_monitor.as_ref().map(|monitor| &monitor.0),
+    );
 
     stop.store(true, Ordering::Relaxed);
     drop(sync_thread.join());
+    if let Some((_, monitor_thread)) = receiver_monitor {
+        drop(monitor_thread.join());
+    }
     result.context("端末の表示でエラーが起きました")?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// 受信機の監視を別スレッドで始める。SNMP は `--transport` などの指定に関係なく、ふつうの UDP ソケットで送る。
+fn spawn_receiver_monitor(
+    target: SocketAddr,
+    config: ReceiverMonitorConfig,
+    clock: Arc<dyn ClockPort>,
+    stop: &Arc<AtomicBool>,
+) -> anyhow::Result<(mpsc::Receiver<ReceiverSnapshot>, thread::JoinHandle<()>)> {
+    let port = UdpTransport::connect(target, Arc::clone(&clock))
+        .with_context(|| format!("SNMP の送受信の準備ができません（{target}）"))?;
+    let mut monitor = ReceiverMonitor::new(config, port, clock);
+    let (tx, rx) = mpsc::channel();
+    let handle = thread::Builder::new()
+        .name("snmp-receiver".into())
+        .spawn({
+            let thread_stop = Arc::clone(stop);
+            move || {
+                // 受け手（UI）が終了した後は送れないが、監視もまもなく止まるので捨ててよい
+                let mut publish = |snapshot: &ReceiverSnapshot| drop(tx.send(snapshot.clone()));
+                monitor.run_until(&mut publish, &thread_stop);
+            }
+        })
+        .context("受信機の監視スレッドを起動できません")?;
+    Ok((rx, handle))
 }
 
 fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
@@ -581,6 +749,10 @@ fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
         .refid
         .clone()
         .unwrap_or_else(|| RefId(DEFAULT_SIM_REFID.to_owned()));
+    anyhow::ensure!(
+        args.snmp_bind.is_none() || args.snmp_mib.is_some(),
+        "--snmp-bind は --snmp-mib と一緒に指定してください"
+    );
     let config = SimServerConfig {
         offset: TimeDelta::from_millis_f64(offset_ms),
         stratum,
@@ -593,7 +765,23 @@ fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
         "疑似 NTP サーバを {} で起動しました（offset {offset_ms:+.3} ms, stratum {stratum}, refid {refid}）。Ctrl+C で終了します。",
         server.local_addr(),
     )?;
+    let agent = match args.snmp_mib {
+        Some(mib) => {
+            let snmp_bind = args.snmp_bind.unwrap_or(DEFAULT_SIM_SNMP_BIND);
+            let agent = SimSnmpAgent::spawn(snmp_bind, mib.profile())
+                .with_context(|| format!("{snmp_bind} で SNMP を待ち受けできません"))?;
+            writeln!(
+                io::stderr().lock(),
+                "疑似 SNMP エージェントを {} で起動しました（{}、コミュニティ名 public）。",
+                agent.local_addr(),
+                mib.profile().mib_name(),
+            )?;
+            Some(agent)
+        }
+        None => None,
+    };
     server.join();
+    drop(agent);
     Ok(ExitCode::SUCCESS)
 }
 

@@ -6,6 +6,8 @@
 //! - キーはコマンドラインの長いオプションと同じ名前で、値の書き方も同じ（`--interval-ms 200` → `interval-ms = 200`）。
 //!   tui / once / stats に共通のもの（サーバ・タイムゾーン・送信方式）は最上位に、
 //!   そのサブコマンドだけのものは `[tui]` などの節に書く。全項目の例は `docs/config.example.toml`
+//! - GNSS 受信機を SNMP で読む指定（`snmp-community` など）は `[tui]` に書く。コミュニティ名を書いたファイルは
+//!   ほかの人に読ませない
 //! - 優先順位はコマンドライン → 設定ファイル → 既定値。真偽の項目（`trend` / `json` / `no-df`）は
 //!   コマンドラインに付けるオプションしかないので、設定ファイルで true にしたものはコマンドラインで戻せない
 //! - 知らないキーはエラーにする（綴りの誤りを黙って無視しない）。値の範囲と形式はコマンドラインと同じ関数で
@@ -25,9 +27,9 @@ use serde::{Deserialize, Deserializer};
 use toml::de::Error as TomlError;
 
 use crate::{
-    Command, DSCP_MAX, ECN_MAX, ModeArg, OnceArgs, PCP_MAX, RefId, SimServerArgs, StatsArgs,
-    TargetArgs, TimestampingArg, TransportArgs, TuiArgs, VLAN_ID_MAX, ZoneArgs, parse_hex_u16,
-    parse_udp_checksum,
+    Command, DSCP_MAX, ECN_MAX, MibArg, ModeArg, OnceArgs, PCP_MAX, RefId, SimMibArg,
+    SimServerArgs, SnmpArgs, StatsArgs, TargetArgs, TimestampingArg, TransportArgs, TuiArgs,
+    VLAN_ID_MAX, ZoneArgs, parse_hex_u16, parse_udp_checksum,
 };
 
 /// 設定ファイルの内容。どの項目も省略でき、省略したものはコマンドラインの値か既定値になる。
@@ -73,6 +75,10 @@ struct TuiSection {
     title: Option<String>,
     footer: Option<String>,
     trend: Option<bool>,
+    snmp_community: Option<String>,
+    snmp_port: Option<u16>,
+    snmp_interval_ms: Option<u64>,
+    snmp_mib: Option<MibArg>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -98,6 +104,8 @@ struct SimServerSection {
     stratum: Option<u8>,
     #[serde(deserialize_with = "refid")]
     refid: Option<RefId>,
+    snmp_mib: Option<SimMibArg>,
+    snmp_bind: Option<SocketAddr>,
 }
 
 /// 設定ファイルの中身を読む。
@@ -130,10 +138,17 @@ impl ConfigFile {
             title,
             footer,
             trend,
+            snmp,
             zone,
             transport,
         } = args;
         let section = &self.tui;
+        let SnmpArgs {
+            community,
+            port,
+            interval_ms: snmp_interval_ms,
+            mib,
+        } = snmp;
         TuiArgs {
             server: server.or_else(|| self.server.clone()),
             interval_ms: interval_ms.or(section.interval_ms),
@@ -142,6 +157,12 @@ impl ConfigFile {
             title: title.or_else(|| section.title.clone()),
             footer: footer.or_else(|| section.footer.clone()),
             trend: trend || section.trend.unwrap_or(false),
+            snmp: SnmpArgs {
+                community: community.or_else(|| section.snmp_community.clone()),
+                port: port.or(section.snmp_port),
+                interval_ms: snmp_interval_ms.or(section.snmp_interval_ms),
+                mib: mib.or(section.snmp_mib),
+            },
             zone: self.fill_zone(zone),
             transport: self.fill_transport(transport),
         }
@@ -188,6 +209,8 @@ impl ConfigFile {
             offset_ms,
             stratum,
             refid,
+            snmp_mib,
+            snmp_bind,
         } = args;
         let section = &self.sim_server;
         SimServerArgs {
@@ -195,6 +218,8 @@ impl ConfigFile {
             offset_ms: offset_ms.or(section.offset_ms),
             stratum: stratum.or(section.stratum),
             refid: refid.or_else(|| section.refid.clone()),
+            snmp_mib: snmp_mib.or(section.snmp_mib),
+            snmp_bind: snmp_bind.or(section.snmp_bind),
         }
     }
 
@@ -346,6 +371,7 @@ mod tests {
     use core::iter;
     use core::time::Duration;
 
+    use application::acl::mib::MibProfile;
     use application::port::ClockPort;
     use application::timestamping::TimestampingStatus;
     use clap::{CommandFactory as _, Parser as _, ValueEnum as _};
@@ -411,6 +437,9 @@ mod tests {
         assert_eq!(file.stats.count, Some(20));
         assert_eq!(file.sim_server.offset_ms, Some(-0.978f64));
         assert_eq!(file.sim_server.refid, Some(RefId("GNSS".to_owned())));
+        assert_eq!(file.tui.snmp_community.as_deref(), Some("public"));
+        assert_eq!(file.tui.snmp_mib, Some(MibArg::Auto));
+        assert_eq!(file.sim_server.snmp_mib, Some(SimMibArg::MeinbergLtng));
     }
 
     /// オプションを足したのに設定ファイル（と例）に足し忘れることを防ぐ。
@@ -601,6 +630,90 @@ title = "BOOTH"
             let file = parse(&format!("timestamping = \"{}\"", name.get_name())).unwrap();
             assert_eq!(file.timestamping, Some(*timestamping));
         }
+    }
+
+    #[test]
+    fn mib_spellings_match_command_line() {
+        for mib in MibArg::value_variants() {
+            let name = mib.to_possible_value().unwrap();
+            let file = parse(&format!("[tui]\nsnmp-mib = \"{}\"", name.get_name())).unwrap();
+            assert_eq!(file.tui.snmp_mib, Some(*mib));
+        }
+        for mib in SimMibArg::value_variants() {
+            let name = mib.to_possible_value().unwrap();
+            let file = parse(&format!("[sim-server]\nsnmp-mib = \"{}\"", name.get_name())).unwrap();
+            assert_eq!(file.sim_server.snmp_mib, Some(*mib));
+        }
+        assert_eq!(
+            MibArg::MicrochipS650
+                .to_possible_value()
+                .unwrap()
+                .get_name(),
+            "microchip-s650"
+        );
+    }
+
+    #[test]
+    fn snmp_settings_merge_and_point_at_the_ntp_server() {
+        let file = "[tui]\nsnmp-community = \"public\"\nsnmp-mib = \"meinberg-ltng\"\n";
+        let Command::Tui(tui) = merged(file, &["tui", "192.168.1.123", "--snmp-port", "16100"])
+        else {
+            panic!("tui のはず");
+        };
+        let (target, config) = tui
+            .snmp
+            .monitor("192.168.1.123:123".parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(target, "192.168.1.123:16100".parse().unwrap());
+        assert_eq!(config.community, b"public");
+        assert_eq!(config.profile, Some(MibProfile::MeinbergLtng));
+        assert_eq!(config.interval, Duration::from_millis(5000));
+
+        // 間隔は下限で止め、auto は判定する
+        let Command::Tui(fast) = merged(
+            "",
+            &[
+                "tui",
+                "127.0.0.1",
+                "--snmp-community",
+                "x",
+                "--snmp-interval-ms",
+                "10",
+                "--snmp-mib",
+                "auto",
+            ],
+        ) else {
+            panic!("tui のはず");
+        };
+        let (_, fast_config) = fast
+            .snmp
+            .monitor("127.0.0.1:123".parse().unwrap())
+            .unwrap()
+            .unwrap();
+        assert_eq!(fast_config.interval, Duration::from_millis(1000));
+        assert_eq!(fast_config.profile, None);
+    }
+
+    /// SNMP の指定は `snmp-community` がなければ使えない。コマンドラインでも設定ファイルでも黙って無視しない。
+    #[test]
+    fn snmp_settings_without_community_are_errors() {
+        let server = "127.0.0.1:123".parse().unwrap();
+        for (file, args) in [
+            ("", &["tui", "127.0.0.1", "--snmp-port", "161"][..]),
+            ("", &["tui", "127.0.0.1", "--snmp-mib", "auto"]),
+            ("[tui]\nsnmp-interval-ms = 2000\n", &["tui", "127.0.0.1"]),
+        ] {
+            let Command::Tui(tui) = merged(file, args) else {
+                panic!("tui のはず");
+            };
+            let error = tui.snmp.monitor(server).unwrap_err();
+            assert!(error.to_string().contains("--snmp-community"), "{error}");
+        }
+        let Command::Tui(plain) = merged("", &["tui", "127.0.0.1"]) else {
+            panic!("tui のはず");
+        };
+        assert!(plain.snmp.monitor(server).unwrap().is_none());
     }
 
     #[test]

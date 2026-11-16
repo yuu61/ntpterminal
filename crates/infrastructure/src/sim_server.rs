@@ -1,4 +1,8 @@
-//! 開発・テスト用の疑似 NTP サーバ。
+//! 開発・テスト用の疑似 NTP サーバと、疑似 SNMP エージェント（[`SimSnmpAgent`]）。
+
+mod snmp_agent;
+
+pub use snmp_agent::{SIM_COMMUNITY, SimSnmpAgent};
 
 use alloc::sync::Arc;
 use core::net::SocketAddr;

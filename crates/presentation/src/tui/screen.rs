@@ -9,14 +9,14 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
-use application::snapshot::SyncSnapshot;
+use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
 use domain::shared_kernel::{NtpTimestamp, PcTime, TimeDelta};
 use domain::time_sync::SyncState;
 
 use super::TuiConfig;
 use super::big_digits::{self, BigText};
-use super::theme;
 use super::trend::{self, SampleHistory, Trend};
+use super::{receiver, theme};
 use crate::format::{
     format_clock, format_date, format_delay_ms, format_offset_ms, state_label, timestamping_label,
 };
@@ -55,12 +55,14 @@ pub(crate) struct ScreenModel {
 
 /// スナップショットと現在時刻から、画面に出す内容を組み立てる。
 ///
+/// - `receiver`: 受信機の監視の最新のスナップショット（`config.receiver` のときだけ使う。まだ届いていなければ `None`）
 /// - `history`: 推移のグラフに使う、これまでの測定値（`config.trend` のときだけ使う）
 /// - `shown`: 大きい時計に出す時刻（[`domain::time_sync::DisplayClock`] の結果）
 /// - `now`: モノトニック時計の現在値（「何秒前」「何秒後」の計算に使う）
 pub(super) fn build(
     config: &TuiConfig,
     snapshot: Option<&SyncSnapshot>,
+    receiver: Option<&ReceiverSnapshot>,
     history: &SampleHistory,
     shown: Option<NtpTimestamp>,
     now: PcTime,
@@ -83,7 +85,7 @@ pub(super) fn build(
         zone_label: config.zone.label().to_owned(),
         status,
         status_color,
-        rows: info_rows(config, snapshot, now),
+        rows: info_rows(config, snapshot, receiver, now),
         trends: if config.trend {
             trend::trends(history)
         } else {
@@ -93,7 +95,13 @@ pub(super) fn build(
     }
 }
 
-fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -> Vec<InfoRow> {
+/// 受信機の行（`config.receiver` のとき）は、基準時計に関わる「Ref ID」の後ろに置く。
+fn info_rows(
+    config: &TuiConfig,
+    snapshot: Option<&SyncSnapshot>,
+    receiver: Option<&ReceiverSnapshot>,
+    now: PcTime,
+) -> Vec<InfoRow> {
     // offset と delay は、基準点と同じ「クロックフィルタが選んだ標本」の値を出す（生の値は揺れる）
     let selected = snapshot.and_then(|snap| snap.selected_sample);
     let last = snapshot.and_then(|snap| snap.last_sample);
@@ -115,7 +123,7 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
         None => None,
     };
 
-    vec![
+    let mut rows = vec![
         row(
             "オフセット",
             offset.map(format_offset_ms),
@@ -140,6 +148,11 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
             info.map(|i| i.reference_id.to_string()),
             theme::TEXT,
         ),
+    ];
+    if config.receiver {
+        rows.extend(receiver::rows(receiver, now));
+    }
+    rows.extend([
         row(
             "NTP version",
             info.map(|i| i.version.to_string()),
@@ -178,7 +191,8 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
                 color,
             )
         },
-    ]
+    ]);
+    rows
 }
 
 /// ずれの大きさで色を変える（1ms 未満: 良好、10ms 未満: 注意、それ以上: 異常）。
@@ -348,7 +362,9 @@ mod tests {
     use super::*;
     use crate::format::{DisplayZone, display_width};
     use alloc::sync::Arc;
+    use application::acl::mib::MibProfile;
     use application::timestamping::TimestampingStatus;
+    use domain::receiver::{ReceiverState, ReceiverStatus, SatelliteCounts};
     use domain::shared_kernel::LocalStamp;
     use domain::time_sync::{
         Anchor, ExchangeStats, LeapIndicator, ReferenceId, Sample, ServerInfo, Stratum,
@@ -368,6 +384,7 @@ mod tests {
             footer: footer.map(str::to_owned),
             zone: DisplayZone::jst(),
             trend: false,
+            receiver: false,
             transport: "UDP ソケット".into(),
             timestamping: Arc::new(TimestampingStatus::new()),
         }
@@ -475,6 +492,7 @@ mod tests {
         let model = build(
             &config(None),
             Some(&snapshot),
+            None,
             &SampleHistory::default(),
             Some(shown),
             seven_seconds_later(),
@@ -507,6 +525,7 @@ mod tests {
         let model = build(
             &config(None),
             None,
+            None,
             &SampleHistory::default(),
             None,
             PcTime::monotonic(0),
@@ -532,6 +551,7 @@ mod tests {
         let model = build(
             &with_trend(config(Some("Sponsored by Example Inc."))),
             Some(&snapshot),
+            None,
             &recent_history(),
             Some(shown),
             now,
@@ -588,6 +608,7 @@ mod tests {
         let model = build(
             &config,
             Some(&snapshot),
+            None,
             &recent_history(),
             Some(shown),
             now,
@@ -606,6 +627,7 @@ mod tests {
         let with = build(
             &config,
             Some(&snapshot),
+            None,
             &recent_history(),
             Some(shown),
             now,
@@ -613,6 +635,7 @@ mod tests {
         let without = build(
             &config,
             Some(&snapshot),
+            None,
             &SampleHistory::default(),
             Some(shown),
             now,
@@ -641,6 +664,7 @@ mod tests {
         let model = build(
             &with_trend(config(Some("footer"))),
             Some(&snapshot),
+            None,
             &recent_history(),
             Some(shown),
             now,
@@ -663,12 +687,74 @@ mod tests {
         let model = build(
             &config(None),
             None,
+            None,
             &SampleHistory::default(),
             None,
             PcTime::monotonic(0),
         );
         let lines = render_text(&model, 40, 24);
         assert!(lines.iter().any(|line| line.contains(CLOCK_PLACEHOLDER)));
+    }
+
+    /// 受信機の行（2 行）は Ref ID の後ろに入り、80×24 で最下部の一文があっても大きい時計を縮めない。
+    #[test]
+    fn receiver_rows_fit_with_the_big_clock_on_80x24() {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let receiver = ReceiverSnapshot {
+            profile: Some(MibProfile::MeinbergLtng),
+            status: Some(ReceiverStatus {
+                name: Some("gps180".to_owned()),
+                state: Some(ReceiverState::Synchronized),
+                state_detail: Some("gpsSync".to_owned()),
+                satellites: SatelliteCounts {
+                    good: Some(5),
+                    in_view: Some(9),
+                    ..SatelliteCounts::default()
+                },
+                ..ReceiverStatus::default()
+            }),
+            last_success: Some(now),
+            ..ReceiverSnapshot::default()
+        };
+        let with_receiver = TuiConfig {
+            receiver: true,
+            ..config(Some("footer"))
+        };
+        let model = build(
+            &with_receiver,
+            Some(&snapshot),
+            Some(&receiver),
+            &SampleHistory::default(),
+            Some(shown),
+            now,
+        );
+        let labels: Vec<&str> = model.rows.iter().map(|row| row.label).collect();
+        let ref_id = labels.iter().position(|&label| label == "Ref ID").unwrap();
+        assert_eq!(labels[ref_id + 1..ref_id + 3], ["GNSS 受信機", "衛星"]);
+
+        let lines = render_text(&model, 80, 24);
+        // 目視確認用: cargo test -p ntpterminal-presentation receiver_rows_fit -- --nocapture
+        println!("{}", lines.join("\n"));
+        // 大きい時計（倍率 1）が描かれ、普通の文字の時計にはなっていない
+        assert!(lines.iter().any(|line| line.contains('█')));
+        assert!(!lines.iter().any(|line| line.contains(&model.clock)));
+        let text = lines.join("\n");
+        assert!(text.contains("Meinberg LTNG（gps180）: 同期（gpsSync）"));
+        assert!(text.contains("良好 5 / 可視 9"));
+        assert!(text.contains("footer"));
+
+        // 既定（--snmp-community なし）では出さない
+        let without = build(
+            &config(None),
+            Some(&snapshot),
+            Some(&receiver),
+            &SampleHistory::default(),
+            Some(shown),
+            now,
+        );
+        assert!(!without.rows.iter().any(|row| row.label == "GNSS 受信機"));
     }
 
     #[test]
