@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Linux 専用のコード（raw_ip / link / kernel_ts）は ubuntu でしか検査されない
+        # Linux 専用のコード（raw_ip / link / kernel_ts / hardware_ts）は ubuntu でしか検査されない
         os: [ubuntu-latest, windows-latest]
     runs-on: ${{ matrix.os }}
     steps:
