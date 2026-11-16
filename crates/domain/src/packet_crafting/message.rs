@@ -1,5 +1,3 @@
-//! NTP メッセージのモデル。
-
 use crate::shared_kernel::NtpTimestamp;
 
 /// NTP メッセージ（RFC 5905 のヘッダ 48 バイト + 後続データ）。
@@ -33,9 +31,7 @@ pub struct NtpMessage {
 }
 
 impl NtpMessage {
-    /// Mode: クライアント
     pub const MODE_CLIENT: u8 = 3;
-    /// Mode: サーバ
     pub const MODE_SERVER: u8 = 4;
 }
 
@@ -64,7 +60,6 @@ impl Default for RequestTemplate {
 }
 
 impl RequestTemplate {
-    /// Transmit Timestamp に `transmit` を入れた要求を作る。
     pub fn build(&self, transmit: NtpTimestamp) -> NtpMessage {
         NtpMessage {
             leap: self.leap,

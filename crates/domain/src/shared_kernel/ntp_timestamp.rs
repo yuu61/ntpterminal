@@ -1,5 +1,3 @@
-//! NTP タイムスタンプ（RFC 5905 の 64 bit 形式）。
-
 use super::time_delta::{NANOS_PER_SEC, TimeDelta};
 
 /// 1900-01-01（NTP の起点）から 1970-01-01（Unix の起点）までの秒数。
@@ -45,13 +43,11 @@ impl NtpTimestamp {
         self.0 == 0
     }
 
-    /// `self − earlier` を求める。era の一周をまたいでも正しい（差が ±68 年以内なら）。
     pub fn wrapping_since(self, earlier: Self) -> TimeDelta {
         let fixed = self.0.wrapping_sub(earlier.0) as i64;
         TimeDelta::from_ntp_fixed(i128::from(fixed))
     }
 
-    /// `self + delta` を求める。era の一周をまたいでも正しい。
     pub fn wrapping_add(self, delta: TimeDelta) -> Self {
         // 最も近い固定小数の値に丸める（0 から遠い側へ丸める四捨五入）
         let scaled = i128::from(delta.as_nanos()) << 32;
@@ -59,7 +55,6 @@ impl NtpTimestamp {
         Self(self.0.wrapping_add(fixed as i64 as u64))
     }
 
-    /// Unix エポックからのナノ秒に変換する（ピボット方式で era を決める）。
     pub fn to_unix_nanos(self) -> i128 {
         let era = if self.seconds() < ERA_PIVOT_SECS {
             1
@@ -72,7 +67,6 @@ impl NtpTimestamp {
         secs * NANOS_PER_SEC + frac_nanos
     }
 
-    /// Unix エポックからのナノ秒から作る。
     pub fn from_unix_nanos(nanos: i128) -> Self {
         let unix_secs = nanos.div_euclid(NANOS_PER_SEC);
         let sub_nanos = nanos.rem_euclid(NANOS_PER_SEC);

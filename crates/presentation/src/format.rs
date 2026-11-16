@@ -68,7 +68,6 @@ impl DisplayZone {
     }
 }
 
-/// 暦の日時。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct CivilTime {
     pub year: i64,

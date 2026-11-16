@@ -78,7 +78,6 @@ impl<W: Write> StatsReporter<W> {
         }
     }
 
-    /// 集計にタイムスタンプの内訳を含める。
     pub fn with_timestamping(mut self, status: Arc<TimestampingStatus>) -> Self {
         self.timestamping = Some(status);
         self

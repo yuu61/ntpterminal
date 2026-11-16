@@ -6,7 +6,6 @@ use std::net::{Ipv4Addr, SocketAddrV4};
 
 /// IPv4 ヘッダの長さ（オプションなし）。
 pub const IPV4_HEADER_LEN: usize = 20;
-/// UDP ヘッダの長さ。
 pub const UDP_HEADER_LEN: usize = 8;
 
 const IP_VERSION_4: u8 = 4;
@@ -15,8 +14,6 @@ const FLAG_DONT_FRAGMENT: u16 = 0x4000;
 const FLAG_MORE_FRAGMENTS: u16 = 0x2000;
 const FRAGMENT_OFFSET_MASK: u16 = 0x1FFF;
 
-/// IPv4 ヘッダの指定。
-///
 /// 注意（Linux の raw ソケット）: ヘッダのチェックサムと全長は常にカーネルが書き換える。
 /// Identification を 0 にするとカーネルが値を入れる。これらをそのまま送れるのは link モードだけ。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -45,10 +42,8 @@ impl Default for Ipv4Spec {
     }
 }
 
-/// UDP チェックサムの入れ方。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum UdpChecksum {
-    /// 正しく計算する
     #[default]
     Compute,
     /// 0（計算しない。IPv4 では許されている）
@@ -57,15 +52,12 @@ pub enum UdpChecksum {
     Fixed(u16),
 }
 
-/// IPv4 / UDP ヘッダの雛形。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct HeaderTemplate {
     pub ipv4: Ipv4Spec,
     pub udp_checksum: UdpChecksum,
 }
 
-/// IPv4 + UDP のパケットを組み立てる。
-///
 /// `source` の IP は必ず実際の送信元を入れること（UDP チェックサムの計算に使うため）。
 pub fn encode_ipv4_udp(
     template: &HeaderTemplate,
@@ -119,7 +111,6 @@ pub fn encode_ipv4_udp(
     packet
 }
 
-/// 受信した IPv4 / UDP パケットの中身。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ReceivedUdp<'a> {
     pub source: SocketAddrV4,
@@ -135,7 +126,6 @@ pub struct ReceivedUdp<'a> {
     pub payload: &'a [u8],
 }
 
-/// IPv4 / UDP として読めなかった理由。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum IpDecodeError {
     #[error("パケットが短すぎます")]
@@ -152,7 +142,6 @@ pub enum IpDecodeError {
     BadUdpLength,
 }
 
-/// IPv4 / UDP パケットを読む。どんな入力でもパニックしない。
 pub fn decode_ipv4_udp(bytes: &[u8]) -> Result<ReceivedUdp<'_>, IpDecodeError> {
     let fixed = bytes
         .get(..IPV4_HEADER_LEN)
@@ -269,7 +258,7 @@ mod tests {
         let packet = encode_ipv4_udp(
             &template,
             addr("192.168.1.10:40000"),
-            addr("192.168.92.234:123"),
+            addr("192.168.1.123:123"),
             &payload,
         );
 
@@ -282,13 +271,13 @@ mod tests {
         assert_eq!(packet[8], 7);
         assert_eq!(packet[9], 17);
         assert_eq!(&packet[12..16], &[192, 168, 1, 10]);
-        assert_eq!(&packet[16..20], &[192, 168, 92, 234]);
+        assert_eq!(&packet[16..20], &[192, 168, 1, 123]);
         // チェックサム欄を含めて計算し直すと 0（正しい）
         assert_eq!(internet_checksum(&packet[..20]), 0);
         assert_eq!(
             udp_checksum(
                 Ipv4Addr::new(192, 168, 1, 10),
-                Ipv4Addr::new(192, 168, 92, 234),
+                Ipv4Addr::new(192, 168, 1, 123),
                 &packet[20..]
             ),
             0
@@ -296,7 +285,7 @@ mod tests {
 
         let received = decode_ipv4_udp(&packet).unwrap();
         assert_eq!(received.source, addr("192.168.1.10:40000"));
-        assert_eq!(received.destination, addr("192.168.92.234:123"));
+        assert_eq!(received.destination, addr("192.168.1.123:123"));
         assert_eq!((received.dscp, received.ecn, received.ttl), (46, 1, 7));
         assert_eq!(received.identification, 0x1234);
         assert!(received.dont_fragment);

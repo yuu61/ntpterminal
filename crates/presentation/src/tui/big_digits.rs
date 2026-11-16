@@ -16,7 +16,6 @@ use ratatui::widgets::Widget;
 const GLYPH_HEIGHT: usize = 5;
 /// 文字と文字の間隔（ピクセル）。
 const GLYPH_GAP: usize = 1;
-/// 選べる最大の倍率。
 const MAX_SCALE: u16 = 12;
 
 /// 文字のビットマップ（`#` が点灯）。数字はすべて同じ幅（4 ピクセル）にして、

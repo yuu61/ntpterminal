@@ -7,7 +7,6 @@ use domain::time_sync::SyncEvent;
 
 use crate::snapshot::SyncSnapshot;
 
-/// PC の時計。
 pub trait ClockPort: Send + Sync {
     /// モノトニック時計と壁時計を続けて読む。
     fn now(&self) -> LocalStamp;
@@ -19,7 +18,6 @@ pub trait NonceSource: Send {
     fn next_nonce(&mut self) -> NtpTimestamp;
 }
 
-/// 受信したパケット。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Inbound {
     /// UDP のペイロード（NTP メッセージ）
@@ -28,7 +26,6 @@ pub struct Inbound {
     pub received: LocalStamp,
 }
 
-/// 送受信のエラー。
 #[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum TransportError {
     /// 宛先に到達できない（ICMP 到達不能を受け取ったなど）。1 回の問い合わせの失敗として扱う。

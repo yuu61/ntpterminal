@@ -1,5 +1,3 @@
-//! 1 回だけ問い合わせるユースケース。
-
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -10,7 +8,6 @@ use domain::time_sync::{RejectReason, Sample, ServerInfo, SourceConfig, SyncEven
 use super::SyncService;
 use crate::port::{ClockPort, NonceSource, PacketPort};
 
-/// 1 回の問い合わせの結果。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OnceOutcome {
     pub sample: Sample,

@@ -11,7 +11,6 @@ pub struct SyncSnapshot {
     pub poll_interval: TimeDelta,
     /// 大きい時計の基準点
     pub anchor: Option<Anchor>,
-    /// 最後に採用した標本
     pub last_sample: Option<Sample>,
     /// クロックフィルタが選んだ標本（直近で往復遅延が最小）
     pub selected_sample: Option<Sample>,

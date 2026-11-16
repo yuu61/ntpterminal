@@ -1,12 +1,7 @@
 //! raw-ip モードの結合テスト（Linux のみ・raw ソケットが必要）。
 //!
 //! 権限が必要なので、通常の `cargo test` では実行しない（`#[ignore]`）。
-//! root で `--ignored` を付けるか、次のように unshare の中で動かす（CLAUDE.md 参照）:
-//!
-//! ```sh
-//! cargo test -p ntpterminal-infrastructure --test raw_ip --no-run   # 通常ユーザでビルド
-//! unshare -rn sh -c 'ip link set lo up && <表示されたテストバイナリ> --ignored'
-//! ```
+//! `sh scripts/privileged_tests.sh` がネットワーク名前空間の中で実行する（root 不要）。
 #![cfg(target_os = "linux")]
 
 use std::io::Read;

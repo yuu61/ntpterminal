@@ -7,14 +7,11 @@ use std::net::Ipv4Addr;
 
 use domain::packet_crafting::MacAddr;
 
-/// 経路が有効
 const RTF_UP: u16 = 0x0001;
-/// ゲートウェイ経由
 const RTF_GATEWAY: u16 = 0x0002;
 /// 近隣表のエントリが完成している（MAC が分かっている）
 const ATF_COM: u32 = 0x02;
 
-/// 経路表の 1 行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct Route {
     pub interface: String,
@@ -95,7 +92,7 @@ mod tests {
 Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT
 eth0\t00000000\t0102A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0
 eth0\t0000A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
-eth0\t005CA8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
+eth0\t0001A8C0\t00000000\t0001\t0\t0\t100\t00FFFFFF\t0\t0\t0
 eth0\t0000000A\tFE02A8C0\t0003\t0\t0\t50\t000000FF\t0\t0\t0
 eth0\t0000000A\t0102A8C0\t0003\t0\t0\t10\t000000FF\t0\t0\t0
 wlan0\t00000000\t01BEA8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
@@ -114,10 +111,10 @@ wlan0\t00000000\t01BEA8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
     #[test]
     fn same_subnet_goes_direct_and_others_via_gateway() {
         let routes = parse_routes(ROUTES);
-        // 192.168.92.0/24 は直結
+        // 192.168.1.0/24 は直結
         assert_eq!(
-            next_hop(&routes, "eth0", Ipv4Addr::new(192, 168, 92, 234)),
-            Some(Ipv4Addr::new(192, 168, 92, 234))
+            next_hop(&routes, "eth0", Ipv4Addr::new(192, 168, 1, 123)),
+            Some(Ipv4Addr::new(192, 168, 1, 123))
         );
         // それ以外はデフォルトゲートウェイ
         assert_eq!(
@@ -131,7 +128,7 @@ wlan0\t00000000\t01BEA8C0\t0003\t0\t0\t600\t00000000\t0\t0\t0
         );
         // ほかのインターフェースの経路は使わない
         assert_eq!(
-            next_hop(&routes, "wlan0", Ipv4Addr::new(192, 168, 92, 234)),
+            next_hop(&routes, "wlan0", Ipv4Addr::new(192, 168, 1, 123)),
             Some(Ipv4Addr::new(192, 168, 190, 1))
         );
         assert_eq!(next_hop(&routes, "eth1", Ipv4Addr::new(10, 1, 2, 3)), None);

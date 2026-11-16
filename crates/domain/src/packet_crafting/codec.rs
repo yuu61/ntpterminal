@@ -8,7 +8,6 @@ use crate::shared_kernel::NtpTimestamp;
 /// NTP ヘッダの長さ（バイト）。
 pub const HEADER_LEN: usize = 48;
 
-/// バイト列を NTP メッセージとして読めなかった。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     #[error("NTP ヘッダより短いパケットです（{len} バイト）")]

@@ -1,5 +1,3 @@
-//! 検証済みのサーバ情報（Stratum・Reference ID など）。
-
 use std::fmt::{self, Write as _};
 use std::net::Ipv4Addr;
 
@@ -41,7 +39,6 @@ impl Stratum {
         self.0
     }
 
-    /// 基準時計に直結したサーバ（stratum 1）か。
     pub const fn is_primary(self) -> bool {
         self.0 == 1
     }
@@ -153,8 +150,8 @@ mod tests {
             "GPS"
         );
         assert_eq!(
-            ReferenceId::interpret(Stratum::new(2), [192, 168, 92, 234]).to_string(),
-            "192.168.92.234"
+            ReferenceId::interpret(Stratum::new(2), [192, 168, 1, 123]).to_string(),
+            "192.168.1.123"
         );
     }
 

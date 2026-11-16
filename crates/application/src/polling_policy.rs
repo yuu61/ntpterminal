@@ -26,7 +26,6 @@ pub fn is_local_network(ip: IpAddr) -> bool {
     }
 }
 
-/// このポーリング間隔で問い合わせてよいか。
 pub fn check_interval(ip: IpAddr, interval: Duration) -> Result<(), PollingPolicyError> {
     if is_local_network(ip) || interval >= PUBLIC_SERVER_MIN_INTERVAL {
         Ok(())
@@ -50,7 +49,7 @@ mod tests {
     fn allows_fast_polling_only_on_local_networks() {
         let fast = Duration::from_millis(500);
         for local in [
-            "192.168.92.234",
+            "192.168.1.123",
             "10.0.0.1",
             "172.16.0.1",
             "127.0.0.1",

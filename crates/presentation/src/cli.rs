@@ -1,5 +1,3 @@
-//! CLI の出力（M1）。
-
 pub mod once;
 pub mod stats;
 

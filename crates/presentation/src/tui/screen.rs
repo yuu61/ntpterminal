@@ -28,7 +28,6 @@ const NO_VALUE: &str = "--";
 /// 注意: `●` は East Asian Ambiguous。端末の「曖昧幅」が半角（既定）であることを前提にしている。
 const STATUS_MARK: &str = "●";
 
-/// 情報欄の 1 行。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct InfoRow {
     pub label: &'static str,
@@ -36,7 +35,6 @@ pub struct InfoRow {
     pub color: Color,
 }
 
-/// 画面に出す内容。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ScreenModel {
     pub title: String,
@@ -203,6 +201,7 @@ fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
     buf.set_line(x, y, line, area.right().saturating_sub(x));
 }
 
+/// 座標の計算はすべて `u16` の飽和演算（`saturating_*`）で行う。端末を極端に縮めてもパニックしないように。
 impl Widget for &ScreenModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 / (空行 / 最下部の一文)
@@ -334,7 +333,7 @@ mod tests {
     fn config(footer: Option<&str>) -> TuiConfig {
         TuiConfig {
             title: "NTP CLOCK".into(),
-            server_label: "192.168.92.234".into(),
+            server_label: "192.168.1.123".into(),
             footer: footer.map(str::to_string),
             zone: DisplayZone::jst(),
             transport: "UDP ソケット".into(),
@@ -489,7 +488,7 @@ mod tests {
         let text = lines.join("\n");
         for expected in [
             "N T P   C L O C K",
-            "192.168.92.234",
+            "192.168.1.123",
             "2026-11-15 (日)  JST",
             "● 同期済み",
             "オフセット",

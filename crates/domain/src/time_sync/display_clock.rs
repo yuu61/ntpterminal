@@ -1,5 +1,3 @@
-//! 表示用の時計: 大きい時計に出す時刻を、逆戻りさせずに基準点へ追従させる。
-
 use super::Anchor;
 use crate::shared_kernel::{NtpTimestamp, PcTime, TimeDelta};
 

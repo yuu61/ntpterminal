@@ -1,5 +1,3 @@
-//! 標本（問い合わせ 1 回分の測定結果）。
-
 use crate::shared_kernel::{LocalStamp, NtpTimestamp, TimeDelta, TimebaseMismatch};
 
 /// PC の時計に対するサーバ時計のずれ（サーバ − PC）。正ならサーバが進んでいる。
@@ -22,7 +20,6 @@ impl RoundTripDelay {
     }
 }
 
-/// 標本を作れなかった理由。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub enum SampleError {
     #[error(transparent)]

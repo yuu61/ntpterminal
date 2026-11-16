@@ -1,9 +1,11 @@
 //! パケットの送受信（[`application::port::PacketPort`] の実装）。
 //!
-//! - `udp`: 標準ライブラリの UDP ソケット。権限不要・全 OS 対応（M1）
-//! - `raw_ip`: raw ソケットで IPv4 / UDP ヘッダから作る。Linux のみ（M3）
-//! - `link`: AF_PACKET で Ethernet フレームから作る。Linux のみ（M4）
-//! - `kernel_ts`: カーネルのタイムスタンプ（SO_TIMESTAMPING）。Linux のみ（M4）
+//! - `udp`: 標準ライブラリの UDP ソケット。権限不要・全 OS 対応
+//! - `raw_ip`: raw ソケットで IPv4 / UDP ヘッダから作る。Linux のみ
+//! - `link`: AF_PACKET で Ethernet フレームから作る。Linux のみ
+//! - `kernel_ts`: カーネルのタイムスタンプ（SO_TIMESTAMPING）。Linux のみ
+//!
+//! ヘッダを自由に作れるモードでも、送信元 IP は経路に合った自分のアドレスを入れる。偽る手段は作らない。
 
 #[cfg(target_os = "linux")]
 mod kernel_ts;
@@ -27,7 +29,6 @@ pub use link::LinkTransport;
 pub use raw_ip::RawIpTransport;
 pub use udp::UdpTransport;
 
-/// 送信モード。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TransportMode {
     Udp,
@@ -36,7 +37,6 @@ pub enum TransportMode {
 }
 
 impl TransportMode {
-    /// 画面に出す名前。
     pub fn label(self) -> &'static str {
         match self {
             Self::Udp => "UDP ソケット",
@@ -46,7 +46,6 @@ impl TransportMode {
     }
 }
 
-/// タイムスタンプの取り方。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum TimestampingMode {
     /// ユーザ空間で時計を読む
@@ -66,7 +65,6 @@ pub struct LinkOptions {
     pub ethernet: EthernetSpec,
 }
 
-/// 送受信の設定。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct TransportOptions {
     /// 送信元ポート（0 なら OS に任せる）
@@ -78,7 +76,6 @@ pub struct TransportOptions {
     pub timestamping: TimestampingMode,
 }
 
-/// 開いた送受信の口。
 pub struct OpenedTransport {
     pub port: Box<dyn PacketPort>,
     /// 画面に出す説明（link モードではインターフェースと宛先 MAC も含む）
@@ -117,7 +114,6 @@ pub fn open(
     }
 }
 
-/// 指定の組み合わせを確かめる（黙って無視しない）。
 fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
     let invalid = |message: &str| {
         Err(io::Error::new(

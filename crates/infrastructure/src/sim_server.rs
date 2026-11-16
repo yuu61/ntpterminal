@@ -12,7 +12,6 @@ use domain::shared_kernel::{NtpTimestamp, TimeDelta};
 
 use crate::clock::system_time_to_ntp;
 
-/// 疑似サーバの設定。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SimServerConfig {
     /// PC の壁時計に対して、サーバ時刻をどれだけ進めるか（負なら遅らせる）

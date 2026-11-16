@@ -1,6 +1,3 @@
-//! 同期状態。
-
-/// 時刻源の同期状態。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum SyncState {
     /// まだ一度も有効な応答を受け取っていない。

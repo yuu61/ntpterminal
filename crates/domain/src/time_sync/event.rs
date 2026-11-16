@@ -1,11 +1,8 @@
-//! ドメインイベントと不採用の理由。
-
 use std::fmt;
 
 use super::{KissCode, Sample, SampleError, ServerInfo, SyncState};
 use crate::shared_kernel::TimeDelta;
 
-/// 応答を採用しなかった理由。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RejectReason {
     /// 応答待ちの問い合わせがないのに受信した
@@ -59,7 +56,6 @@ impl fmt::Display for RejectReason {
     }
 }
 
-/// 時刻源で起きたこと。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum SyncEvent {
     ExchangeStarted {

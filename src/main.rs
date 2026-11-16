@@ -1,6 +1,4 @@
-//! ntpterminal: GNSS タイムサーバのデモ用 NTP クロック。
-//!
-//! ここは組み立て役（composition root）。各層の部品をつなぐだけで、ロジックは持たない。
+//! 組み立て役（composition root）。各層の部品をつなぐだけで、ロジックは持たない。
 
 use std::io;
 use std::net::SocketAddr;
@@ -60,7 +58,7 @@ enum Command {
 
 #[derive(Args)]
 struct TargetArgs {
-    /// NTP サーバ（例: 192.168.92.234 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123
+    /// NTP サーバ（例: 192.168.1.123 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123
     server: String,
     /// 結果を JSON で出力する
     #[arg(long)]
@@ -77,7 +75,6 @@ struct ZoneArgs {
     tz_label: String,
 }
 
-/// 送信方式（CLI での指定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum ModeArg {
     /// 標準の UDP ソケット（権限不要・全 OS）
@@ -88,7 +85,6 @@ enum ModeArg {
     Link,
 }
 
-/// タイムスタンプの取り方（CLI での指定）。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
 enum TimestampingArg {
     /// 使えればカーネル、使えなければユーザ空間
@@ -110,34 +106,34 @@ struct TransportArgs {
     /// 送信元ポート（省略時は OS に任せる）
     #[arg(long)]
     source_port: Option<u16>,
-    /// [raw-ip / link] IP の TTL
+    /// raw-ip / link のみ: IP の TTL
     #[arg(long)]
     ttl: Option<u8>,
-    /// [raw-ip / link] DSCP（0〜63。例: 46 = EF）
+    /// raw-ip / link のみ: DSCP（0〜63。例: 46 = EF）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
     dscp: Option<u8>,
-    /// [raw-ip / link] ECN（0〜3）
+    /// raw-ip / link のみ: ECN（0〜3）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
     ecn: Option<u8>,
-    /// [raw-ip / link] IP の Identification（raw-ip では 0 にするとカーネルが値を入れる）
+    /// raw-ip / link のみ: IP の Identification（raw-ip では 0 にするとカーネルが値を入れる）
     #[arg(long)]
     ip_id: Option<u16>,
-    /// [raw-ip / link] DF（Don't Fragment）ビットを立てない
+    /// raw-ip / link のみ: DF（Don't Fragment）ビットを立てない
     #[arg(long)]
     no_df: bool,
-    /// [raw-ip / link] UDP チェックサム: compute（既定）/ zero / 0x で始まる 16 進の固定値（試験用）
+    /// raw-ip / link のみ: UDP チェックサム: compute（既定）/ zero / 0x で始まる 16 進の固定値（試験用）
     #[arg(long, value_parser = parse_udp_checksum)]
     udp_checksum: Option<UdpChecksum>,
-    /// [link] IP ヘッダのチェックサム（0x で始まる 16 進の固定値。試験用）
+    /// link のみ: IP ヘッダのチェックサム（0x で始まる 16 進の固定値。試験用）
     #[arg(long, value_parser = parse_hex_u16)]
     ip_checksum: Option<u16>,
-    /// [link] 宛先 MAC（省略時は近隣表か ARP で調べる）
+    /// link のみ: 宛先 MAC（省略時は近隣表か ARP で調べる）
     #[arg(long)]
     dst_mac: Option<MacAddr>,
-    /// [link] 802.1Q の VLAN ID（0〜4094）
+    /// link のみ: 802.1Q の VLAN ID（0〜4094）
     #[arg(long, value_parser = clap::value_parser!(u16).range(0..=4094))]
     vlan: Option<u16>,
-    /// [link] 802.1Q の優先度 PCP（0〜7。--vlan なしなら VLAN ID 0 の優先度タグになる）
+    /// link のみ: 802.1Q の優先度 PCP（0〜7。--vlan なしなら VLAN ID 0 の優先度タグになる）
     #[arg(long, value_parser = clap::value_parser!(u8).range(0..=7))]
     pcp: Option<u8>,
 }
@@ -231,7 +227,7 @@ impl ZoneArgs {
 
 #[derive(Args)]
 struct TuiArgs {
-    /// NTP サーバ（例: 192.168.92.234 / 127.0.0.1:12300）。ポート省略時は 123
+    /// NTP サーバ（例: 192.168.1.123 / 127.0.0.1:12300）。ポート省略時は 123
     server: String,
     /// ポーリング間隔（ミリ秒）
     #[arg(long, default_value_t = 500)]

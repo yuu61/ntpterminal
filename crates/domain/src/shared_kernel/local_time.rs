@@ -1,24 +1,24 @@
-//! PC 側で取った時刻。
-
 use super::{NtpTimestamp, TimeDelta};
 
 /// 時刻基準: PC 側の時刻を「どの時計で」取ったか。
 ///
 /// 送信方式（UDP / raw / link）は実行時に選ぶので、時刻基準も実行時の値として持つ。
 /// 異なる時刻基準の時刻どうしは比較も差分もできない（[`TimebaseMismatch`]）。
+///
+/// 実際には、カーネルや NIC の時刻は transport の中でモノトニック時計に写してから渡すので、
+/// ドメインに届くのは `Monotonic` だけ。ほかの値は予約で、混ざったときの安全網として残している。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Timebase {
     /// ユーザ空間で読んだプロセス内のモノトニック時計。
     Monotonic,
-    /// カーネルが付けた CLOCK_REALTIME のタイムスタンプ（Linux。M4 予定）。
+    /// カーネルが付けた CLOCK_REALTIME のタイムスタンプ（予約）。
     KernelRealtime,
-    /// Windows のソフトウェアタイムスタンプ（QPC。M4 予定）。
+    /// Windows のソフトウェアタイムスタンプ（QPC。予約）。
     WindowsQpc,
-    /// NIC のハードウェア時計（PHC）。`index` は /dev/ptpN の番号など（M4 予定）。
+    /// NIC のハードウェア時計（PHC）。`index` は /dev/ptpN の番号など（予約）。
     NicPhc { index: u32 },
 }
 
-/// 異なる時刻基準の時刻を比べようとした。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 #[error("時刻基準が一致しません: {left:?} と {right:?}")]
 pub struct TimebaseMismatch {
@@ -26,9 +26,7 @@ pub struct TimebaseMismatch {
     pub right: Timebase,
 }
 
-/// PC 側で取った時刻。どの時計で取ったか（[`Timebase`]）を必ず持つ。
-///
-/// 値は各時計の任意の起点からのナノ秒。同じ時刻基準どうしでしか比較・差分できない。
+/// PC 側で取った時刻。値は各時計（[`Timebase`]）の任意の起点からのナノ秒。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct PcTime {
     timebase: Timebase,
@@ -40,7 +38,6 @@ impl PcTime {
         Self { timebase, nanos }
     }
 
-    /// モノトニック時計の時刻を作る。
     pub const fn monotonic(nanos: u64) -> Self {
         Self::new(Timebase::Monotonic, nanos)
     }
@@ -53,7 +50,7 @@ impl PcTime {
         self.nanos
     }
 
-    /// `self − earlier` を求める。時刻基準が違えばエラー。
+    /// 時刻基準が違えばエラー。
     pub fn since(self, earlier: Self) -> Result<TimeDelta, TimebaseMismatch> {
         self.ensure_same(earlier)?;
         Ok(TimeDelta::from_i128_nanos(
@@ -61,7 +58,7 @@ impl PcTime {
         ))
     }
 
-    /// `self + delta` を求める。0 未満にはならない。
+    /// 0 未満にはならない。
     pub fn saturating_add(self, delta: TimeDelta) -> Self {
         let nanos = i128::from(self.nanos) + i128::from(delta.as_nanos());
         Self {
@@ -70,7 +67,7 @@ impl PcTime {
         }
     }
 
-    /// `self` が `other` と同時かそれより後か。時刻基準が違えばエラー。
+    /// 時刻基準が違えばエラー。
     pub fn is_at_or_after(self, other: Self) -> Result<bool, TimebaseMismatch> {
         self.ensure_same(other)?;
         Ok(self.nanos >= other.nanos)

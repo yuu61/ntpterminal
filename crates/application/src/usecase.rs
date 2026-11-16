@@ -1,5 +1,3 @@
-//! ユースケース。
-
 mod query_once;
 mod sync_service;
 
