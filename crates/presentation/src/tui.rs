@@ -26,4 +26,6 @@ pub struct TuiConfig {
     /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない
     pub footer: Option<String>,
     pub zone: DisplayZone,
+    /// 送信方式の表示名（"UDP ソケット" / "raw-ip（…）"）
+    pub transport: String,
 }

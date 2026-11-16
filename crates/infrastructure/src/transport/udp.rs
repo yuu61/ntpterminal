@@ -22,16 +22,18 @@ pub struct UdpTransport {
 }
 
 impl UdpTransport {
+    /// 送信元ポートは OS に任せる。
     pub fn connect(server: SocketAddr, clock: Arc<dyn ClockPort>) -> io::Result<Self> {
-        // ループバック宛てならループバックに bind する（Windows のファイアウォール確認を避ける）
-        let bind: SocketAddr = match server {
-            SocketAddr::V4(v4) if v4.ip().is_loopback() => (Ipv4Addr::LOCALHOST, 0).into(),
-            SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
-            SocketAddr::V6(v6) if v6.ip().is_loopback() => (Ipv6Addr::LOCALHOST, 0).into(),
-            SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
-        };
-        let socket = UdpSocket::bind(bind)?;
-        socket.connect(server)?;
+        Self::connect_from(server, 0, clock)
+    }
+
+    /// 送信元ポートを指定する（0 なら OS に任せる）。
+    pub fn connect_from(
+        server: SocketAddr,
+        source_port: u16,
+        clock: Arc<dyn ClockPort>,
+    ) -> io::Result<Self> {
+        let socket = bind_connected(server, source_port)?;
         Ok(Self {
             socket,
             clock,
@@ -77,6 +79,27 @@ impl PacketPort for UdpTransport {
             Err(error) => Err(to_transport_error(error)),
         }
     }
+}
+
+/// `server` に connect した UDP ソケットを作る。
+///
+/// ループバック宛てならループバックに bind する（Windows のファイアウォール確認を避ける）。
+/// connect すると、OS が経路に合った送信元 IP を選び、そのサーバ以外からの受信を捨てる。
+pub(crate) fn bind_connected(server: SocketAddr, source_port: u16) -> io::Result<UdpSocket> {
+    let bind: SocketAddr = match server {
+        SocketAddr::V4(v4) if v4.ip().is_loopback() => (Ipv4Addr::LOCALHOST, source_port).into(),
+        SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, source_port).into(),
+        SocketAddr::V6(v6) if v6.ip().is_loopback() => (Ipv6Addr::LOCALHOST, source_port).into(),
+        SocketAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, source_port).into(),
+    };
+    let socket = UdpSocket::bind(bind).map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!("送信元 {bind} を確保できません（ほかのプログラムが使っていないか確認してください）: {error}"),
+        )
+    })?;
+    socket.connect(server)?;
+    Ok(socket)
 }
 
 /// ICMP 到達不能の後、Linux は ConnectionRefused、Windows は ConnectionReset を返す。

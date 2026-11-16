@@ -18,6 +18,11 @@ cargo run -- once 192.168.92.234 --json
 cargo run -- stats 192.168.92.234 --interval-ms 500 --count 20
 cargo run -- sim-server --offset-ms -0.978      # 実機がないとき。別の端末で ↓
 cargo run -- stats 127.0.0.1:12300
+
+# raw-ip モード（Linux・root）: IPv4 / UDP ヘッダを自作して送る
+sudo ntpterminal tui 192.168.92.234 --transport raw-ip --dscp 46 --ttl 64
+#   ヘッダ指定: --ttl / --dscp / --ecn / --ip-id / --no-df / --udp-checksum compute|zero|0xNNNN
+#   送信元ポート: --source-port（udp / raw-ip 共通）
 ```
 
 ## アーキテクチャ（DDD + レイヤーごとのクレート）
@@ -96,9 +101,35 @@ cargo run -- stats 127.0.0.1:12300
 
 1. **M1（済）**: NTP コア + UDP + CLI（`once` / `stats` / `sim-server`）
 2. **M2（済）**: TUI（`tui` サブコマンド）… 大きい数字・情報欄。Sparkline は任意（未実装）。
-3. M3: `raw-ip` モード（Linux）… IP / UDP ヘッダの生成（`packet_crafting` にヘッダ指定を追加）。
-   送信モードを入れたら、どのモードで動いているかを TUI に表示する。
+3. **M3（済）**: `raw-ip` モード（Linux）… IPv4 / UDP ヘッダの生成（`packet_crafting::ipv4_udp`）。
+   送信方式は TUI・`once`・`stats` に表示する。
 4. M4: `link` モード、カーネル / NIC タイムスタンプ（`Timebase` の追加分を使う）
+
+## raw-ip モードの決まりごと
+
+- Linux のみ（`#[cfg(target_os = "linux")]`）。ほかの OS では `--transport raw-ip` を「Linux のみ対応」エラーにする。
+  socket2 は Linux のときだけ依存に入る（`[target.'cfg(target_os = "linux")'.dependencies]`）。
+- IPv4 のサーバだけ。root か CAP_NET_RAW が必要（なければ分かるエラーを出す）。
+- **Linux のカーネルが書き換える項目は約束しない**: IP ヘッダのチェックサムと全長は常に上書き、
+  Identification が 0 ならカーネルが値を入れる。これらを自由にできるのは link モード（M4）。
+- 送信元 IP は自分で入れる（ガード用 UDP ソケットの `local_addr()`）。UDP チェックサムの疑似ヘッダに使うため。
+  送信元 IP を偽る指定は作らない。
+- 受信用 raw ソケットには届いた UDP がすべて来る（自分の送信の写しも）。送信元・宛先が一致するものだけを
+  transport の中で通し、期限は 1 回の recv につき最初に 1 回だけ決める。
+- 指定できない組み合わせは黙って無視しない（UDP モードでのヘッダ指定はエラー）。
+
+### raw ソケットのテスト
+
+`crates/infrastructure/tests/raw_ip.rs` は `#[ignore]`。WSL / Linux で、ビルドは通常ユーザ、実行は
+ネットワーク名前空間の中で行う（root 不要・ホストのネットワークに影響しない）:
+
+```sh
+BIN=$(cargo test -p ntpterminal-infrastructure --test raw_ip --no-run 2>&1 | grep -oE "/[^ )]+raw_ip-[0-9a-f]+" | head -1)
+unshare -rn sh -c "ip link set lo up && $BIN --ignored --test-threads=1"
+```
+
+ループバックでは UDP チェックサムが検証されないことがあるので、テストでは送信したパケットを横から
+受け取ってチェックサムを計算し直している。
 
 ## TUI の決まりごと
 

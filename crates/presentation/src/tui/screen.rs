@@ -154,6 +154,7 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
             snapshot.map(|s| format!("{}/{}", s.stats.successes, s.stats.attempts)),
             theme::TEXT,
         ),
+        row("送信方式", Some(config.transport.clone()), theme::LABEL),
     ]
 }
 
@@ -321,6 +322,7 @@ mod tests {
             server_label: "192.168.92.234".into(),
             footer: footer.map(str::to_string),
             zone: DisplayZone::jst(),
+            transport: "UDP ソケット".into(),
         }
     }
 
@@ -432,6 +434,7 @@ mod tests {
         assert_eq!(value("最終同期"), "7.0 秒前");
         assert_eq!(value("次回取得"), "9.0 秒後");
         assert_eq!(value("成功/試行"), "687/687");
+        assert_eq!(value("送信方式"), "UDP ソケット");
         assert_eq!(model.date.as_deref(), Some("2026-11-15 (日)"));
     }
 
@@ -440,7 +443,13 @@ mod tests {
         let model = build(&config(None), None, None, PcTime::monotonic(0));
         assert_eq!(model.clock, CLOCK_PLACEHOLDER);
         assert_eq!(model.date, None);
-        assert!(model.rows.iter().all(|row| row.value == NO_VALUE));
+        assert!(
+            model
+                .rows
+                .iter()
+                .filter(|row| row.label != "送信方式")
+                .all(|row| row.value == NO_VALUE)
+        );
         let lines = render_text(&model, 80, 24);
         assert!(lines.iter().any(|line| line.contains("応答待ち（未同期）")));
     }
