@@ -1,0 +1,14 @@
+# clippy の設定。clippy は最も近い clippy.toml を 1 つだけ読み、上位とはマージしない。
+# crates/domain/clippy.toml にも同じ内容を書き、domain だけの禁止事項を足している（変えるときは両方そろえる）。
+
+# テストでは unwrap / expect / panic / 標準出力への表示を使ってよい（失敗をその場で知らせるため）
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+
+# doc コメントでバッククォートなしに書いてよい固有名詞（".." は clippy の既定の一覧を残す）
+doc-valid-idents = ["..", "NTPv4", "EtherType", "SipHash", "KoD"]
+
+# 直接の依存（ratatui・clap・nix など）が別々の版を使っていて、こちらでは揃えられないもの
+allowed-duplicate-crates = ["bitflags", "getrandom", "nix", "r-efi", "syn", "thiserror", "thiserror-impl"]

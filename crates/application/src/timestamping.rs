@@ -3,7 +3,7 @@
 //! 送受信（infrastructure）が書き、表示（TUI・stats・once）が読む。スレッドをまたいで共有するので atomic で持つ。
 //! 「カーネルの時刻を使う設定にしたのに、実際は取れていない」状態を表示で隠さないためのもの。
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 /// `Arc` で共有する。
 #[derive(Debug, Default)]
@@ -28,6 +28,7 @@ pub struct TimestampingCounts {
 }
 
 impl TimestampingStatus {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -43,12 +44,12 @@ impl TimestampingStatus {
         } else {
             &self.user_samples
         };
-        counter.fetch_add(1, Ordering::Relaxed);
+        let _previous = counter.fetch_add(1, Ordering::Relaxed);
         self.last_was_kernel.store(kernel, Ordering::Relaxed);
     }
 
     pub fn record_tx_miss(&self) {
-        self.tx_misses.fetch_add(1, Ordering::Relaxed);
+        let _previous = self.tx_misses.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn counts(&self) -> TimestampingCounts {

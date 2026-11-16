@@ -1,8 +1,10 @@
 //! 同期サービス: 時刻源（集約）とポートをつなぎ、問い合わせを続ける。
 
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use alloc::sync::Arc;
+use core::fmt;
+use core::sync::atomic::{AtomicBool, Ordering};
+use core::time::Duration;
+use std::thread;
 
 use domain::packet_crafting::{RequestTemplate, decode, encode};
 use domain::shared_kernel::TimeDelta;
@@ -24,6 +26,15 @@ pub struct SyncService<P, N> {
     template: RequestTemplate,
 }
 
+impl<P, N> fmt::Debug for SyncService<P, N> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SyncService")
+            .field("source", &self.source)
+            .field("template", &self.template)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<P: PacketPort, N: NonceSource> SyncService<P, N> {
     pub fn new(
         config: SourceConfig,
@@ -42,7 +53,7 @@ impl<P: PacketPort, N: NonceSource> SyncService<P, N> {
         }
     }
 
-    pub fn source(&self) -> &TimeSource {
+    pub const fn source(&self) -> &TimeSource {
         &self.source
     }
 
@@ -70,7 +81,7 @@ impl<P: PacketPort, N: NonceSource> SyncService<P, N> {
             Err(error @ TransportError::Io(_)) => {
                 events.extend(self.source.fail_exchange(error.to_string()));
                 // 壊れたソケットで空回りしないよう、待つはずだった時間だけ休む
-                std::thread::sleep(wait);
+                thread::sleep(wait);
             }
         }
         events
@@ -78,18 +89,19 @@ impl<P: PacketPort, N: NonceSource> SyncService<P, N> {
 
     /// 問い合わせを続け、起きたことを `sink` に通知する。
     /// `max_attempts` を指定すると、その回数だけ送って最後の応答（かタイムアウト）を待って終わる。
-    pub fn run<S: EventSink + ?Sized>(&mut self, sink: &mut S, max_attempts: Option<u64>) {
+    pub fn run<S>(&mut self, sink: &mut S, max_attempts: Option<u64>)
+    where
+        S: EventSink + ?Sized,
+    {
         self.run_until(sink, max_attempts, &AtomicBool::new(false));
     }
 
     /// [`Self::run`] と同じだが、`stop` が立ったら終わる（TUI の終了時など）。
     /// 受信待ちの上限が 100ms なので、立ててから最大 100ms ほどで戻る。
-    pub fn run_until<S: EventSink + ?Sized>(
-        &mut self,
-        sink: &mut S,
-        max_attempts: Option<u64>,
-        stop: &AtomicBool,
-    ) {
+    pub fn run_until<S>(&mut self, sink: &mut S, max_attempts: Option<u64>, stop: &AtomicBool)
+    where
+        S: EventSink + ?Sized,
+    {
         while !stop.load(Ordering::Relaxed) {
             let allow_poll = max_attempts.is_none_or(|max| self.source.stats().attempts < max);
             if !allow_poll && !self.source.is_awaiting_reply() {

@@ -1,10 +1,10 @@
-//! link モード（Linux）: Ethernet フレームから自分で組み立てて、AF_PACKET のソケットで送る。
+//! link モード（Linux）: Ethernet フレームから自分で組み立てて、`AF_PACKET` のソケットで送る。
 //!
 //! raw-ip と違い、カーネルは IP ヘッダに手を加えない（チェックサム・全長・Identification も指定どおり届く）。
-//! 802.1Q の VLAN タグ（PCP / VID）も付けられる。root か CAP_NET_RAW が必要。
+//! 802.1Q の VLAN タグ（PCP / VID）も付けられる。root か `CAP_NET_RAW` が必要。
 //!
 //! - 宛先 MAC: `--dst-mac` の指定 → カーネルの近隣表（/proc/net/arp）→ 自分で ARP 要求、の順に決める
-//! - 受信: 同じインターフェースの IPv4 フレームがすべて来るので、自分の送信（PACKET_OUTGOING）を除き、
+//! - 受信: 同じインターフェースの IPv4 フレームがすべて来るので、自分の送信（`PACKET_OUTGOING`）を除き、
 //!   送信元・宛先で絞り込む。BPF のフィルタは使っていないので、通信量の多いインターフェースでは負荷が増える
 //! - ガード用の UDP ソケット: 送信元ポートの確保、送信元 IP の決定、ICMP 到達不能の抑止（raw-ip と同じ）
 //! - ポリシールーティング（ip rule）には対応しない。合わないときは `--dst-mac` で宛先 MAC を指定する
@@ -12,12 +12,15 @@
 mod interface;
 mod neighbor;
 
+use alloc::sync::Arc;
+use core::fmt;
+use core::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
+use core::time::Duration;
 use std::fs;
-use std::io::{self, ErrorKind, Read};
-use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4, UdpSocket};
-use std::os::fd::AsRawFd;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::io::{self, ErrorKind, Read as _};
+use std::net::UdpSocket;
+use std::os::fd::AsRawFd as _;
+use std::time::Instant;
 
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 use application::timestamping::TimestampingStatus;
@@ -37,10 +40,10 @@ use super::LinkOptions;
 use super::kernel_ts::{KernelTimestamper, recv_with_timestamp_from};
 use super::udp::bind_connected;
 
-/// sockaddr_ll.sll_pkttype: 自分が送ったフレームの写し
+/// `sockaddr_ll.sll_pkttype`: 自分が送ったフレームの写し
 const PACKET_OUTGOING: u8 = 4;
 /// 受信バッファ（ジャンボフレームまで）
-const RECV_BUFFER_LEN: usize = 65_535;
+const RECV_BUFFER_LEN: usize = 0xFFFF;
 /// ARP の応答を待つ合計時間と、要求を送る回数
 const ARP_TIMEOUT: Duration = Duration::from_secs(1);
 const ARP_ATTEMPTS: u32 = 3;
@@ -60,8 +63,24 @@ pub struct LinkTransport {
     kernel: Option<KernelTimestamper>,
 }
 
+impl fmt::Debug for LinkTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LinkTransport")
+            .field("local", &self.local)
+            .field("server", &self.server)
+            .field("destination_mac", &self.destination_mac)
+            .field("headers", &self.headers)
+            .field("ethernet", &self.ethernet)
+            .finish_non_exhaustive()
+    }
+}
+
 impl LinkTransport {
     /// `source_port` が 0 なら OS に任せる。
+    ///
+    /// # Errors
+    ///
+    /// 送信に使うインターフェースや宛先の MAC アドレスが見つからないとき、または `AF_PACKET` のソケットを開けない（権限がない）とき。
     pub fn connect(
         server: SocketAddr,
         source_port: u16,
@@ -69,13 +88,13 @@ impl LinkTransport {
         link: LinkOptions,
         clock: Arc<dyn ClockPort>,
     ) -> io::Result<Self> {
-        let SocketAddr::V4(server) = server else {
+        let SocketAddr::V4(server_v4) = server else {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "link モードは IPv4 のサーバだけに対応しています",
             ));
         };
-        let guard = bind_connected(SocketAddr::V4(server), source_port)?;
+        let guard = bind_connected(server, source_port)?;
         guard.set_nonblocking(true)?;
         let SocketAddr::V4(local) = guard.local_addr()? else {
             return Err(io::Error::other("送信元アドレスが IPv4 ではありません"));
@@ -85,7 +104,7 @@ impl LinkTransport {
             (Some(mac), _) => mac,
             (None, LinkKind::Loopback) => MacAddr::ZERO,
             (None, LinkKind::Ethernet) => {
-                resolve_mac(&interface, &link.ethernet, *local.ip(), *server.ip())?
+                resolve_mac(&interface, link.ethernet, *local.ip(), *server_v4.ip())?
             }
         };
         let socket = packet_socket(&interface, ETHERTYPE_IPV4)?;
@@ -97,7 +116,7 @@ impl LinkTransport {
             destination,
             destination_mac,
             local,
-            server,
+            server: server_v4,
             headers,
             ethernet: link.ethernet,
             clock,
@@ -106,6 +125,11 @@ impl LinkTransport {
         })
     }
 
+    /// カーネルのタイムスタンプを有効にする。
+    ///
+    /// # Errors
+    ///
+    /// ソケットにタイムスタンプの設定をできないとき。
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
             &self.socket,
@@ -116,11 +140,13 @@ impl LinkTransport {
     }
 
     /// 送信元（IP ヘッダに入れているアドレスとポート）。
-    pub fn local_addr(&self) -> SocketAddrV4 {
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddrV4 {
         self.local
     }
 
     /// 画面に出す説明（"link（eth0 → 00:11:22:33:44:55）"）。
+    #[must_use]
     pub fn description(&self) -> String {
         format!("link（{} → {}）", self.interface.name, self.destination_mac)
     }
@@ -133,7 +159,7 @@ impl LinkTransport {
     /// カーネルのタイムスタンプを使うときは受信時刻も返す。
     fn receive_once(&mut self) -> io::Result<(usize, Option<i128>, Option<LinkAddr>)> {
         if self.kernel.is_some() {
-            recv_with_timestamp_from::<LinkAddr>(&self.socket, &mut self.buf)
+            recv_with_timestamp_from::<LinkAddr, _>(&self.socket, &mut self.buf)
         } else {
             let (len, address) = recvfrom::<LinkAddr>(self.socket.as_raw_fd(), &mut self.buf)?;
             Ok((len, None, address))
@@ -141,7 +167,7 @@ impl LinkTransport {
     }
 }
 
-/// AF_PACKET のソケットを作り、インターフェースと EtherType に bind する。
+/// `AF_PACKET` のソケットを作り、インターフェースと EtherType に bind する。
 ///
 /// 作るときはプロトコル 0（まだ何も受け取らない）にして、bind した時点から受け取り始める。
 /// こうしないと、bind する前にほかのインターフェースのフレームが溜まることがある。
@@ -170,7 +196,7 @@ fn packet_socket(interface: &Interface, ethertype: u16) -> io::Result<Socket> {
 /// VLAN を指定しているときは、ARP 要求にも同じ VLAN タグを付ける（相手は VLAN の中にいるため）。
 fn resolve_mac(
     interface: &Interface,
-    ethernet: &EthernetSpec,
+    ethernet: EthernetSpec,
     local_ip: Ipv4Addr,
     server_ip: Ipv4Addr,
 ) -> io::Result<MacAddr> {
@@ -198,13 +224,13 @@ fn resolve_mac(
 /// 自分で ARP 要求を送って、`target` の MAC アドレスを調べる。
 fn arp_resolve(
     interface: &Interface,
-    ethernet: &EthernetSpec,
+    ethernet: EthernetSpec,
     local_ip: Ipv4Addr,
     target: Ipv4Addr,
 ) -> io::Result<MacAddr> {
     let socket = packet_socket(interface, ETHERTYPE_ARP)?;
     let request = encode_ethernet(
-        ethernet,
+        &ethernet,
         MacAddr::BROADCAST,
         interface.mac,
         ETHERTYPE_ARP,
@@ -213,7 +239,7 @@ fn arp_resolve(
     let broadcast = link_addr(interface.index, ETHERTYPE_ARP, MacAddr::BROADCAST)?;
     let mut buf = [0u8; 2048];
     for _ in 0..ARP_ATTEMPTS {
-        sendto(socket.as_raw_fd(), &request, &broadcast, MsgFlags::empty())?;
+        let _: usize = sendto(socket.as_raw_fd(), &request, &broadcast, MsgFlags::empty())?;
         let deadline = Instant::now() + ARP_TIMEOUT / ARP_ATTEMPTS;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
@@ -258,14 +284,14 @@ impl PacketPort for LinkTransport {
             &packet,
         );
         let sent = self.clock.now();
-        sendto(
+        let _: usize = sendto(
             self.socket.as_raw_fd(),
             &frame,
             &self.destination,
             MsgFlags::empty(),
         )
         .map_err(|error| TransportError::Io(error.to_string()))?;
-        if let Some(kernel) = &mut self.kernel {
+        if let Some(kernel) = self.kernel.as_mut() {
             return Ok(kernel.after_send(&self.socket, self.clock.as_ref(), sent));
         }
         Ok(sent)
@@ -295,7 +321,7 @@ impl PacketPort for LinkTransport {
             };
             let observed = self.clock.now();
             // 自分が送ったフレームの写し（ループバックでは応答も 2 回見える）は捨てる
-            if address.is_some_and(|address| address.pkttype() == PACKET_OUTGOING) {
+            if address.is_some_and(|addr| addr.pkttype() == PACKET_OUTGOING) {
                 continue;
             }
             let Ok(frame) = decode_ethernet(&self.buf[..len]) else {
@@ -308,10 +334,9 @@ impl PacketPort for LinkTransport {
                 continue;
             };
             if packet.source == self.server && packet.destination == self.local {
-                let received = match &self.kernel {
-                    Some(kernel) => kernel.choose_received(kernel_time, observed),
-                    None => observed,
-                };
+                let received = self.kernel.as_ref().map_or(observed, |kernel| {
+                    kernel.choose_received(kernel_time, observed)
+                });
                 return Ok(Some(Inbound {
                     payload: packet.payload.to_vec(),
                     received,

@@ -21,6 +21,7 @@ pub struct SyncSnapshot {
 }
 
 impl SyncSnapshot {
+    #[must_use]
     pub fn capture(source: &TimeSource) -> Self {
         Self {
             state: source.state(),

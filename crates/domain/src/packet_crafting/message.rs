@@ -60,6 +60,7 @@ impl Default for RequestTemplate {
 }
 
 impl RequestTemplate {
+    #[must_use]
     pub fn build(&self, transmit: NtpTimestamp) -> NtpMessage {
         NtpMessage {
             leap: self.leap,

@@ -1,5 +1,5 @@
-use std::sync::Arc;
-use std::time::Duration;
+use alloc::sync::Arc;
+use core::time::Duration;
 
 use domain::packet_crafting::RequestTemplate;
 use domain::shared_kernel::TimeDelta;
@@ -25,17 +25,25 @@ pub enum OnceError {
 }
 
 /// 1 回だけ問い合わせる。検証は常時同期と同じ集約（`TimeSource`）で行う。
-pub fn query_once<P: PacketPort, N: NonceSource>(
+///
+/// # Errors
+///
+/// 時間内に応答がなければ [`OnceError::Timeout`]、応答を採用できなければ [`OnceError::Rejected`]、送受信に失敗したら [`OnceError::Transport`]。
+pub fn query_once<P, N>(
     port: P,
     nonce: N,
     clock: Arc<dyn ClockPort>,
     template: RequestTemplate,
     timeout: Duration,
-) -> Result<OnceOutcome, OnceError> {
-    let timeout = TimeDelta::from_std(timeout).max(TimeDelta::from_millis(1));
+) -> Result<OnceOutcome, OnceError>
+where
+    P: PacketPort,
+    N: NonceSource,
+{
+    let time_limit = TimeDelta::from_std(timeout).max(TimeDelta::from_millis(1));
     let config = SourceConfig {
-        response_timeout: timeout,
-        ..SourceConfig::with_poll_interval(timeout)
+        response_timeout: time_limit,
+        ..SourceConfig::with_poll_interval(time_limit)
     };
     let mut service = SyncService::new(config, port, nonce, clock, template);
     loop {
@@ -61,7 +69,11 @@ pub fn query_once<P: PacketPort, N: NonceSource>(
                     seq: Some(_),
                     detail,
                 } => return Err(OnceError::Transport(detail)),
-                _ => {}
+                SyncEvent::ExchangeStarted { .. }
+                | SyncEvent::SampleRejected { .. }
+                | SyncEvent::ExchangeFailed { .. }
+                | SyncEvent::PollIntervalChanged { .. }
+                | SyncEvent::StateChanged { .. } => {}
             }
         }
     }

@@ -12,6 +12,7 @@ pub struct SystemClock {
 }
 
 impl SystemClock {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             origin: Instant::now(),
@@ -36,6 +37,7 @@ impl ClockPort for SystemClock {
     }
 }
 
+#[must_use]
 pub fn system_time_to_ntp(time: SystemTime) -> NtpTimestamp {
     let unix_nanos = match time.duration_since(UNIX_EPOCH) {
         Ok(after) => i128::try_from(after.as_nanos()).unwrap_or(i128::MAX),
@@ -47,20 +49,21 @@ pub fn system_time_to_ntp(time: SystemTime) -> NtpTimestamp {
 /// カーネルが付けた時刻を受け入れる最大の遅れ。これを超えたら時計が飛んだとみなす。
 const MAX_KERNEL_LAG_NANOS: i128 = 1_000_000_000;
 
-/// カーネルが付けた時刻（CLOCK_REALTIME の Unix ナノ秒）を、その直後に読んだ PC の時刻 `observed` を使って
+/// カーネルが付けた時刻（`CLOCK_REALTIME` の Unix ナノ秒）を、その直後に読んだ PC の時刻 `observed` を使って
 /// モノトニック時計の時刻に写す。
 ///
-/// カーネルの時刻と `observed.wall`（`SystemTime`）はどちらも CLOCK_REALTIME なので、その差が
+/// カーネルの時刻と `observed.wall`（`SystemTime`）はどちらも `CLOCK_REALTIME` なので、その差が
 /// 「カーネルが時刻を付けてから読むまでの遅れ」になる。モノトニック時計をその分だけ戻す。
-/// 遅れが負、または 1 秒を超えるとき（chrony などが CLOCK_REALTIME を動かした）は `None`。
+/// 遅れが負、または 1 秒を超えるとき（chrony などが `CLOCK_REALTIME` を動かした）は `None`。
+#[must_use]
 pub fn rebase_kernel_time(kernel_unix_nanos: i128, observed: LocalStamp) -> Option<LocalStamp> {
     let lag = observed.wall.to_unix_nanos() - kernel_unix_nanos;
     if !(0..=MAX_KERNEL_LAG_NANOS).contains(&lag) {
         return None;
     }
-    let lag = TimeDelta::from_nanos(i64::try_from(lag).ok()?);
+    let lag_delta = TimeDelta::from_nanos(i64::try_from(lag).ok()?);
     Some(LocalStamp {
-        mono: observed.mono.saturating_add(-lag),
+        mono: observed.mono.saturating_add(-lag_delta),
         wall: NtpTimestamp::from_unix_nanos(kernel_unix_nanos),
     })
 }
@@ -68,7 +71,7 @@ pub fn rebase_kernel_time(kernel_unix_nanos: i128, observed: LocalStamp) -> Opti
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use core::time::Duration;
 
     fn observed_at(unix_nanos: i128, mono_nanos: u64) -> LocalStamp {
         LocalStamp {

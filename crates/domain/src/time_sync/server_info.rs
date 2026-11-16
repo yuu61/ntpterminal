@@ -1,5 +1,5 @@
-use std::fmt::{self, Write as _};
-use std::net::Ipv4Addr;
+use core::fmt::{self, Write as _};
+use core::net::Ipv4Addr;
 
 use crate::shared_kernel::{NtpTimestamp, TimeDelta};
 
@@ -16,7 +16,8 @@ pub enum LeapIndicator {
 }
 
 impl LeapIndicator {
-    pub fn from_bits(bits: u8) -> Self {
+    #[must_use]
+    pub const fn from_bits(bits: u8) -> Self {
         match bits & 0b11 {
             0 => Self::NoWarning,
             1 => Self::InsertSecond,
@@ -31,14 +32,17 @@ impl LeapIndicator {
 pub struct Stratum(u8);
 
 impl Stratum {
+    #[must_use]
     pub const fn new(value: u8) -> Self {
         Self(value)
     }
 
+    #[must_use]
     pub const fn value(self) -> u8 {
         self.0
     }
 
+    #[must_use]
     pub const fn is_primary(self) -> bool {
         self.0 == 1
     }
@@ -57,7 +61,8 @@ pub enum KissCode {
 }
 
 impl KissCode {
-    pub fn from_bytes(bytes: [u8; 4]) -> Self {
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 4]) -> Self {
         match &bytes {
             b"DENY" => Self::Deny,
             b"RSTR" => Self::Restrict,
@@ -69,7 +74,7 @@ impl KissCode {
 
 impl fmt::Display for KissCode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::Deny => f.write_str("DENY"),
             Self::Restrict => f.write_str("RSTR"),
             Self::RateExceeded => f.write_str("RATE"),
@@ -88,6 +93,7 @@ pub enum ReferenceId {
 }
 
 impl ReferenceId {
+    #[must_use]
     pub fn interpret(stratum: Stratum, raw: [u8; 4]) -> Self {
         if stratum.value() <= 1 {
             Self::Source(raw)
@@ -99,7 +105,7 @@ impl ReferenceId {
 
 impl fmt::Display for ReferenceId {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
+        match *self {
             Self::Source(bytes) => write_ascii(f, bytes),
             Self::Upstream(addr) => write!(f, "{addr}"),
         }
@@ -107,14 +113,14 @@ impl fmt::Display for ReferenceId {
 }
 
 /// 4 文字の ASCII を表示する。末尾の NUL は除き、表示できない文字は '?' にする。
-fn write_ascii(f: &mut fmt::Formatter<'_>, bytes: &[u8; 4]) -> fmt::Result {
+fn write_ascii(formatter: &mut fmt::Formatter<'_>, bytes: [u8; 4]) -> fmt::Result {
     for &byte in bytes.iter().take_while(|&&byte| byte != 0) {
-        let c = if byte.is_ascii_graphic() || byte == b' ' {
+        let shown = if byte.is_ascii_graphic() || byte == b' ' {
             char::from(byte)
         } else {
             '?'
         };
-        f.write_char(c)?;
+        formatter.write_char(shown)?;
     }
     Ok(())
 }

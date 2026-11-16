@@ -1,6 +1,6 @@
 //! ポート: application 層が外側に求める機能。実装は infrastructure（本番）やテスト用の偽物。
 
-use std::time::Duration;
+use core::time::Duration;
 
 use domain::shared_kernel::{LocalStamp, NtpTimestamp};
 use domain::time_sync::SyncEvent;
@@ -38,9 +38,17 @@ pub enum TransportError {
 /// パケットの送受信。接続先（サーバ）は実装側が持つ。
 pub trait PacketPort: Send {
     /// ペイロードを送る。送る直前の時刻（T1）を返す。
+    ///
+    /// # Errors
+    ///
+    /// 送信に失敗したとき。
     fn send(&mut self, payload: &[u8]) -> Result<LocalStamp, TransportError>;
 
     /// 最大 `timeout` まで受信を待つ。時間内に届かなければ `Ok(None)`。
+    ///
+    /// # Errors
+    ///
+    /// 受信に失敗したとき（時間切れはエラーにしない）。
     fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError>;
 }
 

@@ -1,10 +1,11 @@
 //! `stats` サブコマンドの出力: 1 回ごとの結果と、最後の集計。
 
+use core::fmt;
+use core::net::SocketAddr;
+use core::time::Duration;
 use std::io::Write;
-use std::net::SocketAddr;
-use std::time::Duration;
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use application::port::EventSink;
 use application::snapshot::SyncSnapshot;
@@ -39,7 +40,7 @@ impl RunningStats {
         }
         let delta = value - self.mean;
         self.mean += delta / self.count as f64;
-        self.m2 += delta * (value - self.mean);
+        self.m2 = delta.mul_add(value - self.mean, self.m2);
     }
 
     /// 標本標準偏差。
@@ -64,6 +65,16 @@ pub struct StatsReporter<W: Write> {
     timestamping: Option<Arc<TimestampingStatus>>,
 }
 
+impl<W: Write> fmt::Debug for StatsReporter<W> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("StatsReporter")
+            .field("server", &self.server)
+            .field("json", &self.json)
+            .field("summary_every", &self.summary_every)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<W: Write> StatsReporter<W> {
     pub fn new(out: W, server: SocketAddr, json: bool) -> Self {
         Self {
@@ -78,12 +89,14 @@ impl<W: Write> StatsReporter<W> {
         }
     }
 
+    #[must_use]
     pub fn with_timestamping(mut self, status: Arc<TimestampingStatus>) -> Self {
         self.timestamping = Some(status);
         self
     }
 
     /// `every` 回の問い合わせごとに途中集計を出す（回数無制限で動かすとき用）。
+    #[must_use]
     pub fn with_periodic_summary(mut self, every: u64) -> Self {
         self.summary_every = Some(every.max(1));
         self
@@ -92,12 +105,12 @@ impl<W: Write> StatsReporter<W> {
     /// 開始時の見出し（テキスト形式のときだけ）。
     pub fn write_header(&mut self, interval: Duration, transport: &str) {
         if !self.json {
-            let _ = writeln!(
+            drop(writeln!(
                 self.out,
                 "{} に {} ms 間隔で問い合わせます（送信方式: {transport}）",
                 self.server,
                 interval.as_millis()
-            );
+            ));
         }
     }
 
@@ -107,8 +120,8 @@ impl<W: Write> StatsReporter<W> {
         } else {
             self.summary_text()
         };
-        let _ = writeln!(self.out, "{text}");
-        let _ = self.out.flush();
+        drop(writeln!(self.out, "{text}"));
+        drop(self.out.flush());
     }
 
     fn summary_text(&self) -> String {
@@ -119,9 +132,9 @@ impl<W: Write> StatsReporter<W> {
         };
         let stats = snapshot.stats;
         let rate = if stats.attempts == 0 {
-            0.0
+            0.0f64
         } else {
-            stats.successes as f64 / stats.attempts as f64 * 100.0
+            stats.successes as f64 / stats.attempts as f64 * 100.0f64
         };
         let mut rows = vec![
             (
@@ -136,16 +149,16 @@ impl<W: Write> StatsReporter<W> {
                     stats.strays
                 ),
             ),
-            ("状態", state_label(snapshot.state).to_string()),
+            ("状態", state_label(snapshot.state).to_owned()),
         ];
-        if let Some(status) = &self.timestamping {
+        if let Some(status) = self.timestamping.as_ref() {
             rows.push(("タイムスタンプ", timestamping_breakdown(&status.counts())));
         }
         if self.offset_ms.count > 0 {
             rows.push(("offset [ms]", describe(&self.offset_ms, true)));
             rows.push(("delay [ms]", describe(&self.delay_ms, false)));
         } else {
-            rows.push(("結果", "有効な応答がありませんでした".to_string()));
+            rows.push(("結果", "有効な応答がありませんでした".to_owned()));
         }
         if let Some(selected) = snapshot.selected_sample {
             rows.push((
@@ -193,6 +206,10 @@ impl<W: Write> StatsReporter<W> {
         .to_string()
     }
 
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "ExchangeFailed の detail（String）を借りるには、参照のまま照合するしかない（ref は ref_patterns で禁止）"
+    )]
     fn line_text(event: &SyncEvent, snapshot: &SyncSnapshot) -> Option<String> {
         let line = match event {
             SyncEvent::ExchangeStarted { .. } => return None,
@@ -231,6 +248,10 @@ impl<W: Write> StatsReporter<W> {
         Some(line)
     }
 
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "ExchangeFailed の detail（String）を借りるには、参照のまま照合するしかない（ref は ref_patterns で禁止）"
+    )]
     fn line_json(event: &SyncEvent, snapshot: &SyncSnapshot) -> Option<String> {
         let value = match event {
             SyncEvent::ExchangeStarted { .. } => return None,
@@ -274,17 +295,17 @@ impl<W: Write> StatsReporter<W> {
 impl<W: Write> EventSink for StatsReporter<W> {
     fn publish(&mut self, event: &SyncEvent, snapshot: &SyncSnapshot) {
         self.last = Some(*snapshot);
-        if let SyncEvent::SampleAccepted { sample, .. } = event {
+        if let SyncEvent::SampleAccepted { sample, .. } = *event {
             self.offset_ms.push(sample.offset().delta().as_millis_f64());
             self.delay_ms.push(sample.delay().delta().as_millis_f64());
         }
-        let line = if self.json {
+        let rendered = if self.json {
             Self::line_json(event, snapshot)
         } else {
             Self::line_text(event, snapshot)
         };
-        if let Some(line) = line {
-            let _ = writeln!(self.out, "{line}");
+        if let Some(line) = rendered {
+            drop(writeln!(self.out, "{line}"));
         }
         if let (Some(every), Some(seq)) = (self.summary_every, finished_seq(event))
             && seq.is_multiple_of(every)
@@ -295,22 +316,26 @@ impl<W: Write> EventSink for StatsReporter<W> {
 }
 
 /// 問い合わせが（成否にかかわらず）終わったイベントなら、その番号。
-fn finished_seq(event: &SyncEvent) -> Option<u64> {
-    match event {
+const fn finished_seq(event: &SyncEvent) -> Option<u64> {
+    match *event {
         SyncEvent::SampleAccepted { seq, .. }
         | SyncEvent::ExchangeTimedOut { seq }
         | SyncEvent::SampleRejected { seq: Some(seq), .. }
-        | SyncEvent::ExchangeFailed { seq: Some(seq), .. } => Some(*seq),
-        _ => None,
+        | SyncEvent::ExchangeFailed { seq: Some(seq), .. } => Some(seq),
+        SyncEvent::ExchangeStarted { .. }
+        | SyncEvent::SampleRejected { .. }
+        | SyncEvent::ExchangeFailed { .. }
+        | SyncEvent::PollIntervalChanged { .. }
+        | SyncEvent::StateChanged { .. } => None,
     }
 }
 
 fn describe(stats: &RunningStats, signed: bool) -> String {
-    let value = |v: f64| {
+    let value = |number: f64| {
         if signed {
-            format!("{v:+.3}")
+            format!("{number:+.3}")
         } else {
-            format!("{v:.3}")
+            format!("{number:.3}")
         }
     };
     format!(
@@ -342,13 +367,15 @@ mod tests {
     #[test]
     fn running_stats_match_direct_computation() {
         let mut stats = RunningStats::default();
-        for value in [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0] {
+        for value in [
+            2.0f64, 4.0f64, 4.0f64, 4.0f64, 5.0f64, 5.0f64, 7.0f64, 9.0f64,
+        ] {
             stats.push(value);
         }
         assert_eq!(stats.count, 8);
-        assert!((stats.mean - 5.0).abs() < 1e-12);
-        assert_eq!((stats.min, stats.max), (2.0, 9.0));
+        assert!((stats.mean - 5.0).abs() < 1e-12f64);
+        assert_eq!((stats.min, stats.max), (2.0f64, 9.0f64));
         // 標本標準偏差 = sqrt(32 / 7)
-        assert!((stats.stddev() - (32.0_f64 / 7.0).sqrt()).abs() < 1e-12);
+        assert!((stats.stddev() - (32.0f64 / 7.0).sqrt()).abs() < 1e-12f64);
     }
 }

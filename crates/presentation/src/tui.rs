@@ -14,7 +14,7 @@ mod theme;
 pub use app::run;
 pub use snapshot_sender::SnapshotSender;
 
-use std::sync::Arc;
+use alloc::sync::Arc;
 
 use application::timestamping::TimestampingStatus;
 

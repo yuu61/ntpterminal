@@ -14,6 +14,10 @@ pub struct Anchor {
 
 impl Anchor {
     /// 標本の T4 を基準点にする。
+    ///
+    /// # Errors
+    ///
+    /// 標本の T4 がモノトニック時計の時刻でないとき。
     pub fn from_sample(sample: &Sample) -> Result<Self, TimebaseMismatch> {
         let mono = sample.received().mono;
         if mono.timebase() != Timebase::Monotonic {
@@ -28,15 +32,21 @@ impl Anchor {
         })
     }
 
+    #[must_use]
     pub const fn server_time(&self) -> NtpTimestamp {
         self.server_time
     }
 
+    #[must_use]
     pub const fn mono(&self) -> PcTime {
         self.mono
     }
 
     /// `now`（モノトニック時計）の瞬間のサーバ時刻を推定する。
+    ///
+    /// # Errors
+    ///
+    /// `now` の時刻基準が基準点と違うとき。
     pub fn project(&self, now: PcTime) -> Result<NtpTimestamp, TimebaseMismatch> {
         Ok(self.server_time.wrapping_add(now.since(self.mono)?))
     }
@@ -71,6 +81,12 @@ mod tests {
     #[test]
     fn requires_monotonic_timebase() {
         let sample = sample_received_at(PcTime::new(Timebase::KernelRealtime, 1_000));
-        assert!(Anchor::from_sample(&sample).is_err());
+        assert_eq!(
+            Anchor::from_sample(&sample).unwrap_err(),
+            TimebaseMismatch {
+                left: Timebase::KernelRealtime,
+                right: Timebase::Monotonic,
+            }
+        );
     }
 }

@@ -15,14 +15,14 @@ executable() {
 }
 
 for test in raw_ip link; do
-    bin=$(cargo test -q -p ntpterminal-infrastructure --test "$test" --no-run --message-format=json | executable "/$test-")
-    echo "== $test =="
+    bin=$(cargo test -q -p ntpterminal-infrastructure --test "${test}" --no-run --message-format=json | executable "/${test}-")
+    echo "== ${test} =="
     unshare -rn sh -c "ip link set lo up \
         && echo 1 > /proc/sys/net/ipv4/conf/lo/route_localnet \
         && echo 1 > /proc/sys/net/ipv4/conf/lo/accept_local \
-        && '$bin' --ignored --test-threads=1"
+        && '${bin}' --ignored --test-threads=1"
 done
 
 ntpterminal=$(cargo build -q --message-format=json | executable "/ntpterminal$")
 echo "== veth（2 つの名前空間）=="
-sh scripts/link_veth_check.sh "$ntpterminal"
+sh scripts/link_veth_check.sh "${ntpterminal}"

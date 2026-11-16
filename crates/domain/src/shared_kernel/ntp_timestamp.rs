@@ -12,67 +12,79 @@ const ERA_PIVOT_SECS: u32 = 0x8000_0000;
 /// 2036-02-07 06:28:16 UTC に秒フィールドが一周する（era 0 → 1）。
 /// - 差の計算は [`Self::wrapping_since`] を使う。両者が ±68 年以内なら一周をまたいでも正しい。
 /// - 絶対時刻への変換（[`Self::to_unix_nanos`]）はピボット方式:
-///   秒 < 0x8000_0000 なら era 1 とみなす。これで 1968〜2104 年を表せる。
+///   秒 < `0x8000_0000` なら era 1 とみなす。これで 1968〜2104 年を表せる。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct NtpTimestamp(u64);
 
 impl NtpTimestamp {
     pub const ZERO: Self = Self(0);
 
+    #[must_use]
     pub const fn from_bits(bits: u64) -> Self {
         Self(bits)
     }
 
+    #[must_use]
     pub const fn to_bits(self) -> u64 {
         self.0
     }
 
+    #[must_use]
     pub const fn from_parts(seconds: u32, fraction: u32) -> Self {
         Self(((seconds as u64) << 32) | fraction as u64)
     }
 
+    #[must_use]
     pub const fn seconds(self) -> u32 {
         (self.0 >> 32) as u32
     }
 
+    #[must_use]
     pub const fn fraction(self) -> u32 {
-        self.0 as u32
+        (self.0 & 0xFFFF_FFFF) as u32
     }
 
+    #[must_use]
     pub const fn is_zero(self) -> bool {
         self.0 == 0
     }
 
+    #[must_use]
     pub fn wrapping_since(self, earlier: Self) -> TimeDelta {
-        let fixed = self.0.wrapping_sub(earlier.0) as i64;
+        let fixed = self.0.wrapping_sub(earlier.0).cast_signed();
         TimeDelta::from_ntp_fixed(i128::from(fixed))
     }
 
+    #[must_use]
     pub fn wrapping_add(self, delta: TimeDelta) -> Self {
         // 最も近い固定小数の値に丸める（0 から遠い側へ丸める四捨五入）
-        let scaled = i128::from(delta.as_nanos()) << 32;
+        let scaled = i128::from(delta.as_nanos()) << 32i32;
         let fixed = (scaled + scaled.signum() * (NANOS_PER_SEC / 2)) / NANOS_PER_SEC;
-        Self(self.0.wrapping_add(fixed as i64 as u64))
+        // 下位 64 ビットだけを足す（2^64 で折り返す）
+        Self(
+            self.0
+                .wrapping_add((fixed.cast_unsigned() & 0xFFFF_FFFF_FFFF_FFFF) as u64),
+        )
     }
 
+    #[must_use]
     pub fn to_unix_nanos(self) -> i128 {
-        let era = if self.seconds() < ERA_PIVOT_SECS {
-            1
-        } else {
-            0
-        };
+        let era = i128::from(self.seconds() < ERA_PIVOT_SECS);
         let secs = i128::from(self.seconds()) + era * ERA_SECS - NTP_TO_UNIX_SECS;
         // 最も近いナノ秒に丸める（分解能 ≒ 0.23ns なので、from_unix_nanos との往復で値が変わらない）
-        let frac_nanos = (i128::from(self.fraction()) * NANOS_PER_SEC + (1 << 31)) >> 32;
+        let frac_nanos = (i128::from(self.fraction()) * NANOS_PER_SEC + (1 << 31i32)) >> 32i32;
         secs * NANOS_PER_SEC + frac_nanos
     }
 
-    pub fn from_unix_nanos(nanos: i128) -> Self {
+    #[must_use]
+    pub const fn from_unix_nanos(nanos: i128) -> Self {
         let unix_secs = nanos.div_euclid(NANOS_PER_SEC);
         let sub_nanos = nanos.rem_euclid(NANOS_PER_SEC);
-        let seconds = (unix_secs + NTP_TO_UNIX_SECS).rem_euclid(ERA_SECS) as u32;
-        // sub_nanos < 1e9 なので結果は必ず 2^32 未満
-        let fraction = ((sub_nanos << 32) / NANOS_PER_SEC) as u32;
+        // 秒は 2^32 で折り返す（下位 32 ビット。rem_euclid(ERA_SECS) と同じ値）
+        let seconds = ((unix_secs + NTP_TO_UNIX_SECS).cast_unsigned() & 0xFFFF_FFFF) as u32;
+        // sub_nanos は 0 以上 1e9 未満なので結果は必ず 2^32 未満（マスクしても値は変わらない）
+        let fraction =
+            (((sub_nanos << 32i32) / NANOS_PER_SEC).cast_unsigned() & 0xFFFF_FFFF) as u32;
         Self::from_parts(seconds, fraction)
     }
 }

@@ -18,50 +18,65 @@ pub struct DisplayZone {
 }
 
 impl DisplayZone {
-    pub fn new(offset_secs: i32, label: impl Into<String>) -> Self {
+    pub fn new<L>(offset_secs: i32, label: L) -> Self
+    where
+        L: Into<String>,
+    {
         Self {
             offset_secs,
             label: label.into(),
         }
     }
 
+    #[must_use]
     pub fn jst() -> Self {
         Self::new(9 * 3600, "JST")
     }
 
+    #[must_use]
     pub fn utc() -> Self {
         Self::new(0, "UTC")
     }
 
-    pub fn offset_secs(&self) -> i32 {
+    #[must_use]
+    pub const fn offset_secs(&self) -> i32 {
         self.offset_secs
     }
 
+    #[must_use]
     pub fn label(&self) -> &str {
         &self.label
     }
 
     /// "+09:00" / "-05:30" / "+0900" / "Z" 形式のオフセットを秒にする。
+    ///
+    /// # Errors
+    ///
+    /// 形式が違うとき、または範囲外（時が 14、分が 59 を超える）のとき。利用者向けの文言を返す。
     pub fn parse_offset(text: &str) -> Result<i32, String> {
-        let text = text.trim();
-        if text.eq_ignore_ascii_case("z") || text.eq_ignore_ascii_case("utc") {
+        let trimmed = text.trim();
+        if trimmed.eq_ignore_ascii_case("z") || trimmed.eq_ignore_ascii_case("utc") {
             return Ok(0);
         }
-        let invalid = || format!("タイムゾーンは +09:00 の形式で指定してください: {text}");
-        let (sign, rest) = if let Some(rest) = text.strip_prefix('+') {
-            (1, rest)
-        } else if let Some(rest) = text.strip_prefix('-') {
-            (-1, rest)
+        let invalid = || format!("タイムゾーンは +09:00 の形式で指定してください: {trimmed}");
+        let (sign, rest) = if let Some(rest) = trimmed.strip_prefix('+') {
+            (1i32, rest)
+        } else if let Some(rest) = trimmed.strip_prefix('-') {
+            (-1i32, rest)
         } else {
             return Err(invalid());
         };
-        let digits: String = rest.chars().filter(|&c| c != ':').collect();
-        if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        // ":" を除いた 4 桁の数字（hhmm）を 1 桁ずつ読む
+        let digits: Option<Vec<i32>> = rest
+            .chars()
+            .filter(|&ch| ch != ':')
+            .map(|ch| i32::try_from(ch.to_digit(10)?).ok())
+            .collect();
+        let Some(&[h1, h2, m1, m2]) = digits.as_deref() else {
             return Err(invalid());
-        }
-        let hours: i32 = digits[..2].parse().map_err(|_| invalid())?;
-        let minutes: i32 = digits[2..].parse().map_err(|_| invalid())?;
-        if hours > 14 || minutes > 59 {
+        };
+        let (hours, minutes) = (h1 * 10i32 + h2, m1 * 10i32 + m2);
+        if hours > 14i32 || minutes > 59i32 {
             return Err(invalid());
         }
         Ok(sign * (hours * 3600 + minutes * 60))
@@ -82,12 +97,14 @@ pub struct CivilTime {
 }
 
 /// NTP タイムスタンプを、UTC から `offset_secs` ずらした暦の日時にする。
+#[must_use]
 pub fn to_civil(timestamp: NtpTimestamp, offset_secs: i32) -> CivilTime {
     let local = timestamp.to_unix_nanos() + i128::from(offset_secs) * NANOS_PER_SEC;
-    let secs = local.div_euclid(NANOS_PER_SEC) as i64;
-    let nanos = local.rem_euclid(NANOS_PER_SEC) as u32;
+    // NTP の時刻（1968〜2104 年）なので、秒は i64 に、1 秒未満のナノ秒は u32 に必ず収まる
+    let secs = i64::try_from(local.div_euclid(NANOS_PER_SEC)).unwrap_or(i64::MAX);
+    let nanos = u32::try_from(local.rem_euclid(NANOS_PER_SEC)).unwrap_or(0);
     let days = secs.div_euclid(SECS_PER_DAY);
-    let second_of_day = secs.rem_euclid(SECS_PER_DAY) as u32;
+    let second_of_day = u32::try_from(secs.rem_euclid(SECS_PER_DAY)).unwrap_or(0);
     let (year, month, day) = civil_from_days(days);
     CivilTime {
         year,
@@ -98,7 +115,7 @@ pub fn to_civil(timestamp: NtpTimestamp, offset_secs: i32) -> CivilTime {
         second: second_of_day % 60,
         nanos,
         // 1970-01-01 は木曜日
-        weekday: (days + 4).rem_euclid(7) as u32,
+        weekday: u32::try_from((days + 4).rem_euclid(7)).unwrap_or(0),
     }
 }
 
@@ -118,67 +135,79 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
         shifted_month - 9
     };
     let year = year_of_era + era * 400 + i64::from(month <= 2);
-    (year, month as u32, day as u32)
+    // 月は 1〜12、日は 1〜31 なので必ず u32 に収まる
+    (
+        year,
+        u32::try_from(month).unwrap_or(1),
+        u32::try_from(day).unwrap_or(1),
+    )
 }
 
 /// "2026-11-15 (日) 17:25:45.146 JST"
+#[must_use]
 pub fn format_date_time(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
-    let c = to_civil(timestamp, zone.offset_secs());
+    let civil = to_civil(timestamp, zone.offset_secs());
     format!(
         "{:04}-{:02}-{:02} ({}) {:02}:{:02}:{:02}.{:03} {}",
-        c.year,
-        c.month,
-        c.day,
-        WEEKDAYS_JA[c.weekday as usize],
-        c.hour,
-        c.minute,
-        c.second,
-        c.nanos / 1_000_000,
+        civil.year,
+        civil.month,
+        civil.day,
+        WEEKDAYS_JA[civil.weekday as usize],
+        civil.hour,
+        civil.minute,
+        civil.second,
+        civil.nanos / 1_000_000,
         zone.label()
     )
 }
 
 /// 時刻だけ: "17:25:45.146"
+#[must_use]
 pub fn format_clock(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
-    let c = to_civil(timestamp, zone.offset_secs());
+    let civil = to_civil(timestamp, zone.offset_secs());
     format!(
         "{:02}:{:02}:{:02}.{:03}",
-        c.hour,
-        c.minute,
-        c.second,
-        c.nanos / 1_000_000
+        civil.hour,
+        civil.minute,
+        civil.second,
+        civil.nanos / 1_000_000
     )
 }
 
 /// 日付だけ: "2026-11-15 (日)"
+#[must_use]
 pub fn format_date(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
-    let c = to_civil(timestamp, zone.offset_secs());
+    let civil = to_civil(timestamp, zone.offset_secs());
     format!(
         "{:04}-{:02}-{:02} ({})",
-        c.year, c.month, c.day, WEEKDAYS_JA[c.weekday as usize]
+        civil.year, civil.month, civil.day, WEEKDAYS_JA[civil.weekday as usize]
     )
 }
 
 /// "2026-11-16T08:25:37.923456789Z"（UTC。JSON 用）
+#[must_use]
 pub fn format_rfc3339_utc(timestamp: NtpTimestamp) -> String {
-    let c = to_civil(timestamp, 0);
+    let civil = to_civil(timestamp, 0);
     format!(
         "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:09}Z",
-        c.year, c.month, c.day, c.hour, c.minute, c.second, c.nanos
+        civil.year, civil.month, civil.day, civil.hour, civil.minute, civil.second, civil.nanos
     )
 }
 
 /// offset の表示: "+5.012 ms" / "-0.978 ms"（符号付き）
+#[must_use]
 pub fn format_offset_ms(delta: TimeDelta) -> String {
     format!("{:+.3} ms", delta.as_millis_f64())
 }
 
 /// delay などの表示: "0.423 ms"
+#[must_use]
 pub fn format_delay_ms(delta: TimeDelta) -> String {
     format!("{:.3} ms", delta.as_millis_f64())
 }
 
-pub fn state_label(state: SyncState) -> &'static str {
+#[must_use]
+pub const fn state_label(state: SyncState) -> &'static str {
     match state {
         SyncState::Unsynchronized => "未同期",
         SyncState::Synchronized => "同期済み",
@@ -188,7 +217,8 @@ pub fn state_label(state: SyncState) -> &'static str {
 }
 
 /// JSON 用の状態名。
-pub fn state_key(state: SyncState) -> &'static str {
+#[must_use]
+pub const fn state_key(state: SyncState) -> &'static str {
     match state {
         SyncState::Unsynchronized => "unsynchronized",
         SyncState::Synchronized => "synchronized",
@@ -197,7 +227,8 @@ pub fn state_key(state: SyncState) -> &'static str {
     }
 }
 
-pub fn leap_label(leap: LeapIndicator) -> &'static str {
+#[must_use]
+pub const fn leap_label(leap: LeapIndicator) -> &'static str {
     match leap {
         LeapIndicator::NoWarning => "なし",
         LeapIndicator::InsertSecond => "うるう秒の挿入予告",
@@ -207,7 +238,8 @@ pub fn leap_label(leap: LeapIndicator) -> &'static str {
 }
 
 /// JSON 用のうるう秒予告の名前。
-pub fn leap_key(leap: LeapIndicator) -> &'static str {
+#[must_use]
+pub const fn leap_key(leap: LeapIndicator) -> &'static str {
     match leap {
         LeapIndicator::NoWarning => "none",
         LeapIndicator::InsertSecond => "insert",
@@ -217,7 +249,8 @@ pub fn leap_key(leap: LeapIndicator) -> &'static str {
 }
 
 /// タイムスタンプの出どころ（直近の受信）。カーネルの時刻が取れていないことを隠さない。
-pub fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
+#[must_use]
+pub const fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
     if !counts.kernel_enabled {
         "ユーザ空間"
     } else if counts.kernel_samples == 0 && counts.user_samples == 0 {
@@ -230,6 +263,7 @@ pub fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
 }
 
 /// タイムスタンプの内訳: "カーネル 12 回 / ユーザ空間 0 回（送信時刻なし 0 回）"
+#[must_use]
 pub fn timestamping_breakdown(counts: &TimestampingCounts) -> String {
     if counts.kernel_enabled {
         format!(
@@ -237,7 +271,7 @@ pub fn timestamping_breakdown(counts: &TimestampingCounts) -> String {
             counts.kernel_samples, counts.user_samples, counts.tx_misses
         )
     } else {
-        "ユーザ空間".to_string()
+        "ユーザ空間".to_owned()
     }
 }
 
@@ -247,14 +281,15 @@ pub fn display_width(text: &str) -> usize {
 }
 
 /// 表示幅が `width` になるまで右側に空白を足す。
+#[must_use]
 pub fn pad_to_width(text: &str, width: usize) -> String {
     let padding = width.saturating_sub(display_width(text));
     format!("{text}{}", " ".repeat(padding))
 }
 
-fn char_width(c: char) -> usize {
+fn char_width(ch: char) -> usize {
     let wide = matches!(
-        u32::from(c),
+        u32::from(ch),
         0x1100..=0x115F
             | 0x2E80..=0x303E
             | 0x3041..=0x33FF
@@ -334,17 +369,28 @@ mod tests {
     fn jst_shifts_across_midnight() {
         // 2026-11-15 20:00 UTC = 2026-11-16 05:00 JST（月曜）
         let secs = 20_772 * SECS_PER_DAY + 20 * 3600;
-        let c = to_civil(unix_secs(secs), DisplayZone::jst().offset_secs());
-        assert_eq!((c.month, c.day, c.hour, c.weekday), (11, 16, 5, 1));
+        let civil = to_civil(unix_secs(secs), DisplayZone::jst().offset_secs());
+        assert_eq!(
+            (civil.month, civil.day, civil.hour, civil.weekday),
+            (11, 16, 5, 1)
+        );
     }
 
     #[test]
     fn parses_timezone_offsets() {
-        assert_eq!(DisplayZone::parse_offset("+09:00"), Ok(32_400));
-        assert_eq!(DisplayZone::parse_offset("-0530"), Ok(-19_800));
-        assert_eq!(DisplayZone::parse_offset("Z"), Ok(0));
-        assert!(DisplayZone::parse_offset("09:00").is_err());
-        assert!(DisplayZone::parse_offset("+25:00").is_err());
+        assert_eq!(DisplayZone::parse_offset("+09:00"), Ok(32_400i32));
+        assert_eq!(DisplayZone::parse_offset("-0530"), Ok(-19_800i32));
+        assert_eq!(DisplayZone::parse_offset("Z"), Ok(0i32));
+        assert!(
+            DisplayZone::parse_offset("09:00")
+                .unwrap_err()
+                .contains("+09:00 の形式")
+        );
+        assert!(
+            DisplayZone::parse_offset("+25:00")
+                .unwrap_err()
+                .contains("+09:00 の形式")
+        );
     }
 
     #[test]

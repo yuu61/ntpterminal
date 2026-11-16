@@ -1,5 +1,5 @@
+use core::hash::BuildHasher as _;
 use std::collections::hash_map::RandomState;
-use std::hash::BuildHasher;
 
 use application::port::NonceSource;
 use domain::shared_kernel::NtpTimestamp;
@@ -16,6 +16,7 @@ pub struct RandomNonce {
 }
 
 impl RandomNonce {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             hasher: RandomState::new(),
@@ -45,12 +46,15 @@ impl NonceSource for RandomNonce {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::iter;
     use std::collections::HashSet;
 
     #[test]
     fn produces_distinct_non_zero_values() {
         let mut nonce = RandomNonce::new();
-        let values: HashSet<u64> = (0..1_000).map(|_| nonce.next_nonce().to_bits()).collect();
+        let values: HashSet<u64> = iter::repeat_with(|| nonce.next_nonce().to_bits())
+            .take(1000)
+            .collect();
         assert_eq!(values.len(), 1_000);
         assert!(!values.contains(&0));
     }

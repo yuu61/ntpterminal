@@ -1,4 +1,4 @@
-use std::net::SocketAddr;
+use core::net::SocketAddr;
 
 use application::usecase::{OnceError, OnceOutcome};
 use serde_json::json;
@@ -9,6 +9,7 @@ use crate::format::{
     leap_label,
 };
 
+#[must_use]
 pub fn render_text(
     server: SocketAddr,
     transport: &str,
@@ -19,7 +20,7 @@ pub fn render_text(
     let OnceOutcome {
         sample,
         server_info,
-    } = outcome;
+    } = *outcome;
     let rows = [
         ("サーバ", server.to_string()),
         (
@@ -33,7 +34,7 @@ pub fn render_text(
         ("Stratum", server_info.stratum.value().to_string()),
         ("Ref ID", server_info.reference_id.to_string()),
         ("NTP version", server_info.version.to_string()),
-        ("Leap", leap_label(server_info.leap).to_string()),
+        ("Leap", leap_label(server_info.leap).to_owned()),
         ("Precision", format!("2^{} s", server_info.precision)),
         ("Root delay", format_delay_ms(server_info.root_delay)),
         (
@@ -44,13 +45,14 @@ pub fn render_text(
             "サーバ時刻",
             format_date_time(sample.server_transmit(), zone),
         ),
-        ("送信方式", transport.to_string()),
-        ("タイムスタンプ", timestamping.to_string()),
+        ("送信方式", transport.to_owned()),
+        ("タイムスタンプ", timestamping.to_owned()),
     ];
     render_rows(&rows)
 }
 
 /// JSON（1 行）。
+#[must_use]
 pub fn render_json(
     server: SocketAddr,
     transport: &str,
@@ -60,7 +62,7 @@ pub fn render_json(
     let OnceOutcome {
         sample,
         server_info,
-    } = outcome;
+    } = *outcome;
     json!({
         "ok": true,
         "server": server.to_string(),
@@ -81,6 +83,7 @@ pub fn render_json(
 }
 
 /// 失敗時の JSON（1 行）。
+#[must_use]
 pub fn render_error_json(server: SocketAddr, error: &OnceError) -> String {
     json!({
         "ok": false,

@@ -7,11 +7,15 @@ use crate::format::{display_width, pad_to_width};
 fn render_rows(rows: &[(&str, String)]) -> String {
     let width = rows
         .iter()
-        .map(|(label, _)| display_width(label))
+        .map(|&(label, _)| display_width(label))
         .max()
         .unwrap_or(0)
         + 2;
-    rows.iter()
-        .map(|(label, value)| format!("{}{value}\n", pad_to_width(label, width)))
-        .collect()
+    let mut out = String::new();
+    for row in rows {
+        out.push_str(&pad_to_width(row.0, width));
+        out.push_str(&row.1);
+        out.push('\n');
+    }
+    out
 }

@@ -7,21 +7,24 @@
 //! East Asian Ambiguous（端末の設定で幅が 1 にも 2 にもなる）なので、なるべく使わない。
 //! 半分だけ点灯するセル（倍率が奇数のとき）だけ `▀` / `▄` を使う。
 
-use ratatui::buffer::Buffer;
+use core::iter;
+
+use ratatui::buffer::{Buffer, Cell};
 use ratatui::layout::Rect;
 use ratatui::style::Color;
 use ratatui::widgets::Widget;
 
 /// フォントの高さ（ピクセル）。
-const GLYPH_HEIGHT: usize = 5;
+const GLYPH_ROWS: u16 = 5;
+const GLYPH_HEIGHT: usize = GLYPH_ROWS as usize;
 /// 文字と文字の間隔（ピクセル）。
 const GLYPH_GAP: usize = 1;
 const MAX_SCALE: u16 = 12;
 
 /// 文字のビットマップ（`#` が点灯）。数字はすべて同じ幅（4 ピクセル）にして、
 /// 数字が変わっても時計が左右に揺れないようにする。
-fn glyph(c: char) -> Option<[&'static str; GLYPH_HEIGHT]> {
-    Some(match c {
+const fn glyph(ch: char) -> Option<[&'static str; GLYPH_HEIGHT]> {
+    Some(match ch {
         '0' => ["####", "#..#", "#..#", "#..#", "####"],
         '1' => ["..#.", ".##.", "..#.", "..#.", ".###"],
         '2' => ["####", "...#", "####", "#...", "####"],
@@ -41,7 +44,11 @@ fn glyph(c: char) -> Option<[&'static str; GLYPH_HEIGHT]> {
 
 /// 文字列のピクセル幅（知らない文字は数えない）。
 fn pixel_width(text: &str) -> usize {
-    let widths: Vec<usize> = text.chars().filter_map(glyph).map(|g| g[0].len()).collect();
+    let widths: Vec<usize> = text
+        .chars()
+        .filter_map(glyph)
+        .map(|pattern| pattern[0].len())
+        .collect();
     widths.iter().sum::<usize>() + widths.len().saturating_sub(1) * GLYPH_GAP
 }
 
@@ -51,23 +58,23 @@ fn rasterize(text: &str) -> Vec<Vec<bool>> {
     for (index, pattern) in text.chars().filter_map(glyph).enumerate() {
         for (row, line) in rows.iter_mut().zip(pattern) {
             if index > 0 {
-                row.extend(std::iter::repeat_n(false, GLYPH_GAP));
+                row.extend(iter::repeat_n(false, GLYPH_GAP));
             }
-            row.extend(line.bytes().map(|b| b == b'#'));
+            row.extend(line.bytes().map(|byte| byte == b'#'));
         }
     }
     rows
 }
 
 /// 倍率 `scale` で描いたときの大きさ（幅, 高さ。単位はセル）。
-pub fn size(text: &str, scale: u16) -> (u16, u16) {
+pub(super) fn size(text: &str, scale: u16) -> (u16, u16) {
     let width = u16::try_from(pixel_width(text)).unwrap_or(u16::MAX);
-    let height = (GLYPH_HEIGHT as u16).saturating_mul(scale).div_ceil(2);
+    let height = GLYPH_ROWS.saturating_mul(scale).div_ceil(2);
     (width.saturating_mul(scale), height)
 }
 
 /// 幅と高さに収まる最大の倍率。倍率 1 でも収まらなければ `None`。
-pub fn fit_scale(text: &str, max_width: u16, max_height: u16) -> Option<u16> {
+pub(super) fn fit_scale(text: &str, max_width: u16, max_height: u16) -> Option<u16> {
     (1..=MAX_SCALE).rev().find(|&scale| {
         let (width, height) = size(text, scale);
         width <= max_width && height <= max_height
@@ -75,14 +82,14 @@ pub fn fit_scale(text: &str, max_width: u16, max_height: u16) -> Option<u16> {
 }
 
 /// 大きい数字のウィジェット。`area` の左上から描く（はみ出す部分は描かない）。
-pub struct BigText<'a> {
-    text: &'a str,
+pub(super) struct BigText<'text> {
+    text: &'text str,
     scale: u16,
     color: Color,
 }
 
-impl<'a> BigText<'a> {
-    pub fn new(text: &'a str, scale: u16, color: Color) -> Self {
+impl<'text> BigText<'text> {
+    pub(super) fn new(text: &'text str, scale: u16, color: Color) -> Self {
         Self {
             text,
             scale: scale.max(1),
@@ -109,18 +116,12 @@ impl Widget for BigText<'_> {
                 let Some(cell) = buf.cell_mut(position) else {
                     continue;
                 };
-                match (top, bottom) {
-                    (true, true) => {
-                        cell.set_symbol(" ").set_bg(self.color);
-                    }
-                    (true, false) => {
-                        cell.set_symbol("▀").set_fg(self.color);
-                    }
-                    (false, true) => {
-                        cell.set_symbol("▄").set_fg(self.color);
-                    }
-                    (false, false) => {}
-                }
+                let _: &mut Cell = match (top, bottom) {
+                    (true, true) => cell.set_symbol(" ").set_bg(self.color),
+                    (true, false) => cell.set_symbol("▀").set_fg(self.color),
+                    (false, true) => cell.set_symbol("▄").set_fg(self.color),
+                    (false, false) => cell,
+                };
             }
         }
     }
@@ -142,9 +143,9 @@ mod tests {
                     .map(|x| {
                         let cell = &buf[(x, y)];
                         if cell.symbol() == " " && cell.bg == Color::Cyan {
-                            "█".to_string()
+                            "█".to_owned()
                         } else {
-                            cell.symbol().to_string()
+                            cell.symbol().to_owned()
                         }
                     })
                     .collect()

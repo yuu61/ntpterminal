@@ -1,7 +1,9 @@
+use alloc::sync::Arc;
+use core::fmt;
+use core::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
+use core::time::Duration;
 use std::io::{self, ErrorKind};
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
-use std::sync::Arc;
-use std::time::Duration;
+use std::net::UdpSocket;
 
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 #[cfg(target_os = "linux")]
@@ -27,13 +29,29 @@ pub struct UdpTransport {
     kernel: Option<KernelTimestamper>,
 }
 
+impl fmt::Debug for UdpTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UdpTransport")
+            .field("socket", &self.socket)
+            .finish_non_exhaustive()
+    }
+}
+
 impl UdpTransport {
     /// 送信元ポートは OS に任せる。
+    ///
+    /// # Errors
+    ///
+    /// ソケットを用意できない、または connect できないとき。
     pub fn connect(server: SocketAddr, clock: Arc<dyn ClockPort>) -> io::Result<Self> {
         Self::connect_from(server, 0, clock)
     }
 
     /// 送信元ポートを指定する（0 なら OS に任せる）。
+    ///
+    /// # Errors
+    ///
+    /// ソケットを用意できない（送信元ポートが使用中など）、または connect できないとき。
     pub fn connect_from(
         server: SocketAddr,
         source_port: u16,
@@ -50,6 +68,10 @@ impl UdpTransport {
     }
 
     /// 権限は不要。
+    ///
+    /// # Errors
+    ///
+    /// ソケットにタイムスタンプの設定をできないとき。
     #[cfg(target_os = "linux")]
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
@@ -60,6 +82,11 @@ impl UdpTransport {
         Ok(())
     }
 
+    /// bind したローカルのアドレス。
+    ///
+    /// # Errors
+    ///
+    /// OS からアドレスを取得できないとき。
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.socket.local_addr()
     }
@@ -68,9 +95,12 @@ impl UdpTransport {
 impl PacketPort for UdpTransport {
     fn send(&mut self, payload: &[u8]) -> Result<LocalStamp, TransportError> {
         let sent = self.clock.now();
-        self.socket.send(payload).map_err(to_transport_error)?;
+        let _: usize = self
+            .socket
+            .send(payload)
+            .map_err(|error| to_transport_error(&error))?;
         #[cfg(target_os = "linux")]
-        if let Some(kernel) = &mut self.kernel {
+        if let Some(kernel) = self.kernel.as_mut() {
             return Ok(kernel.after_send(&self.socket, self.clock.as_ref(), sent));
         }
         Ok(sent)
@@ -78,12 +108,12 @@ impl PacketPort for UdpTransport {
 
     fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError> {
         // set_read_timeout は 0 を受け付けないので、最低 1ms 待つ
-        let timeout = timeout.max(Duration::from_millis(1));
+        let wait = timeout.max(Duration::from_millis(1));
         self.socket
-            .set_read_timeout(Some(timeout))
-            .map_err(to_transport_error)?;
+            .set_read_timeout(Some(wait))
+            .map_err(|error| to_transport_error(&error))?;
         #[cfg(target_os = "linux")]
-        if let Some(kernel) = &self.kernel {
+        if let Some(kernel) = self.kernel.as_ref() {
             return match recv_with_timestamp(&self.socket, &mut self.buf) {
                 Ok((len, kernel_time)) => {
                     let received = kernel.choose_received(kernel_time, self.clock.now());
@@ -92,7 +122,7 @@ impl PacketPort for UdpTransport {
                         received,
                     }))
                 }
-                Err(error) => recv_error(error),
+                Err(error) => recv_error(&error),
             };
         }
         match self.socket.recv(&mut self.buf) {
@@ -103,13 +133,13 @@ impl PacketPort for UdpTransport {
                     received,
                 }))
             }
-            Err(error) => recv_error(error),
+            Err(error) => recv_error(&error),
         }
     }
 }
 
-/// タイムアウトは Unix では WouldBlock、Windows では TimedOut になる。
-fn recv_error(error: io::Error) -> Result<Option<Inbound>, TransportError> {
+/// タイムアウトは Unix では `WouldBlock`、Windows では `TimedOut` になる。
+fn recv_error(error: &io::Error) -> Result<Option<Inbound>, TransportError> {
     if matches!(
         error.kind(),
         ErrorKind::WouldBlock | ErrorKind::TimedOut | ErrorKind::Interrupted
@@ -124,7 +154,7 @@ fn recv_error(error: io::Error) -> Result<Option<Inbound>, TransportError> {
 ///
 /// ループバック宛てならループバックに bind する（Windows のファイアウォール確認を避ける）。
 /// connect すると、OS が経路に合った送信元 IP を選び、そのサーバ以外からの受信を捨てる。
-pub(crate) fn bind_connected(server: SocketAddr, source_port: u16) -> io::Result<UdpSocket> {
+pub(super) fn bind_connected(server: SocketAddr, source_port: u16) -> io::Result<UdpSocket> {
     let bind: SocketAddr = match server {
         SocketAddr::V4(v4) if v4.ip().is_loopback() => (Ipv4Addr::LOCALHOST, source_port).into(),
         SocketAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, source_port).into(),
@@ -141,13 +171,15 @@ pub(crate) fn bind_connected(server: SocketAddr, source_port: u16) -> io::Result
     Ok(socket)
 }
 
-/// ICMP 到達不能の後、Linux は ConnectionRefused、Windows は ConnectionReset を返す。
+/// ICMP 到達不能の後、Linux は `ConnectionRefused`、Windows は `ConnectionReset` を返す。
 /// どちらも「その問い合わせの失敗」であって、プログラムを止める理由ではない。
-fn to_transport_error(error: io::Error) -> TransportError {
-    match error.kind() {
-        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset => {
-            TransportError::Unreachable(error.to_string())
-        }
-        _ => TransportError::Io(error.to_string()),
+fn to_transport_error(error: &io::Error) -> TransportError {
+    if matches!(
+        error.kind(),
+        ErrorKind::ConnectionRefused | ErrorKind::ConnectionReset
+    ) {
+        TransportError::Unreachable(error.to_string())
+    } else {
+        TransportError::Io(error.to_string())
     }
 }

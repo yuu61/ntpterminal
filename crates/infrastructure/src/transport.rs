@@ -2,8 +2,8 @@
 //!
 //! - `udp`: 標準ライブラリの UDP ソケット。権限不要・全 OS 対応
 //! - `raw_ip`: raw ソケットで IPv4 / UDP ヘッダから作る。Linux のみ
-//! - `link`: AF_PACKET で Ethernet フレームから作る。Linux のみ
-//! - `kernel_ts`: カーネルのタイムスタンプ（SO_TIMESTAMPING）。Linux のみ
+//! - `link`: `AF_PACKET` で Ethernet フレームから作る。Linux のみ
+//! - `kernel_ts`: カーネルのタイムスタンプ（`SO_TIMESTAMPING`）。Linux のみ
 //!
 //! ヘッダを自由に作れるモードでも、送信元 IP は経路に合った自分のアドレスを入れる。偽る手段は作らない。
 
@@ -15,9 +15,10 @@ mod link;
 mod raw_ip;
 mod udp;
 
+use alloc::sync::Arc;
+use core::fmt;
+use core::net::SocketAddr;
 use std::io;
-use std::net::SocketAddr;
-use std::sync::Arc;
 
 use application::port::{ClockPort, PacketPort};
 use application::timestamping::TimestampingStatus;
@@ -37,7 +38,8 @@ pub enum TransportMode {
 }
 
 impl TransportMode {
-    pub fn label(self) -> &'static str {
+    #[must_use]
+    pub const fn label(self) -> &'static str {
         match self {
             Self::Udp => "UDP ソケット",
             Self::RawIp => "raw-ip（IP / UDP ヘッダを自作）",
@@ -82,9 +84,21 @@ pub struct OpenedTransport {
     pub description: String,
 }
 
+impl fmt::Debug for OpenedTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("OpenedTransport")
+            .field("description", &self.description)
+            .finish_non_exhaustive()
+    }
+}
+
 /// 指定したモードで送受信の口を開く。
 ///
 /// 使えない組み合わせは黙って無視せず、エラーにする。実際に使えているタイムスタンプは `status` に記録される。
+///
+/// # Errors
+///
+/// 使えないモードとオプションの組み合わせを指定したとき、またはソケットを開けないとき。
 pub fn open(
     mode: TransportMode,
     server: SocketAddr,
@@ -94,31 +108,47 @@ pub fn open(
 ) -> io::Result<OpenedTransport> {
     validate(mode, &options)?;
     match mode {
-        TransportMode::Udp => {
-            #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
-            let mut transport = UdpTransport::connect_from(server, options.source_port, clock)?;
-            #[cfg(target_os = "linux")]
-            apply_timestamping(options.timestamping, || {
-                transport.enable_kernel_timestamps(Arc::clone(&status))
-            })?;
-            #[cfg(not(target_os = "linux"))]
-            let _ = status;
-            Ok(OpenedTransport {
-                port: Box::new(transport),
-                description: mode.label().to_string(),
-            })
-        }
+        TransportMode::Udp => Ok(OpenedTransport {
+            port: Box::new(open_udp(server, &options, clock, &status)?),
+            description: mode.label().to_owned(),
+        }),
         TransportMode::RawIp | TransportMode::Link => {
             open_linux_only(mode, server, options, clock, status)
         }
     }
 }
 
+/// UDP の送受信の口を開き、モードに応じてカーネルのタイムスタンプを有効にする。
+#[cfg(target_os = "linux")]
+fn open_udp(
+    server: SocketAddr,
+    options: &TransportOptions,
+    clock: Arc<dyn ClockPort>,
+    status: &Arc<TimestampingStatus>,
+) -> io::Result<UdpTransport> {
+    let mut transport = UdpTransport::connect_from(server, options.source_port, clock)?;
+    apply_timestamping(options.timestamping, || {
+        transport.enable_kernel_timestamps(Arc::clone(status))
+    })?;
+    Ok(transport)
+}
+
+/// UDP の送受信の口を開く（カーネルのタイムスタンプは Linux のみなので使わない）。
+#[cfg(not(target_os = "linux"))]
+fn open_udp(
+    server: SocketAddr,
+    options: &TransportOptions,
+    clock: Arc<dyn ClockPort>,
+    _status: &Arc<TimestampingStatus>,
+) -> io::Result<UdpTransport> {
+    UdpTransport::connect_from(server, options.source_port, clock)
+}
+
 fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
     let invalid = |message: &str| {
         Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            message.to_string(),
+            message.to_owned(),
         ))
     };
     if cfg!(not(target_os = "linux")) {
@@ -172,7 +202,7 @@ fn apply_timestamping(
             )
         }),
         TimestampingMode::Auto => {
-            let _ = enable();
+            drop(enable());
             Ok(())
         }
     }
@@ -210,7 +240,7 @@ fn open_linux_only(
     })?;
     Ok(OpenedTransport {
         port: Box::new(transport),
-        description: mode.label().to_string(),
+        description: mode.label().to_owned(),
     })
 }
 
@@ -311,8 +341,8 @@ mod tests {
         };
         assert!(validate(TransportMode::RawIp, &ip_checksum).is_err());
         if cfg!(target_os = "linux") {
-            assert!(validate(TransportMode::Link, &ip_checksum).is_ok());
-            assert!(validate(TransportMode::Link, &link).is_ok());
+            validate(TransportMode::Link, &ip_checksum).unwrap();
+            validate(TransportMode::Link, &link).unwrap();
         }
     }
 }

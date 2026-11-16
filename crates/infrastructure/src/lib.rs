@@ -3,6 +3,8 @@
 //! OS 固有のコードはこのクレートにだけ置く（`#[cfg(target_os = "...")]` で分ける）。
 //! unsafe もここだけで許可する。
 
+extern crate alloc;
+
 pub mod clock;
 pub mod nonce;
 pub mod resolve;

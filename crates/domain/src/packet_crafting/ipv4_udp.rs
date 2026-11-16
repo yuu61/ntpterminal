@@ -2,10 +2,12 @@
 //!
 //! 解析は任意の受信パケット（ほかの通信を含む）に対して行うので、どんな入力でもパニックしない。
 
-use std::net::{Ipv4Addr, SocketAddrV4};
+use core::net::{Ipv4Addr, SocketAddrV4};
 
+/// IPv4 ヘッダ（オプションなし）の長さを 32 bit 単位で数えたもの（IHL）。
+const IPV4_HEADER_WORDS: u8 = 5;
 /// IPv4 ヘッダの長さ（オプションなし）。
-pub const IPV4_HEADER_LEN: usize = 20;
+pub const IPV4_HEADER_LEN: usize = IPV4_HEADER_WORDS as usize * 4;
 pub const UDP_HEADER_LEN: usize = 8;
 
 const IP_VERSION_4: u8 = 4;
@@ -59,6 +61,7 @@ pub struct HeaderTemplate {
 }
 
 /// `source` の IP は必ず実際の送信元を入れること（UDP チェックサムの計算に使うため）。
+#[must_use]
 pub fn encode_ipv4_udp(
     template: &HeaderTemplate,
     source: SocketAddrV4,
@@ -66,12 +69,12 @@ pub fn encode_ipv4_udp(
     payload: &[u8],
 ) -> Vec<u8> {
     let udp_len = u16::try_from(UDP_HEADER_LEN + payload.len()).unwrap_or(u16::MAX);
-    let total_len = udp_len.saturating_add(IPV4_HEADER_LEN as u16);
+    let total_len = udp_len.saturating_add(u16::from(IPV4_HEADER_WORDS) * 4);
     let spec = &template.ipv4;
 
     let mut packet = Vec::with_capacity(usize::from(total_len));
-    packet.push((IP_VERSION_4 << 4) | (IPV4_HEADER_LEN / 4) as u8);
-    packet.push(((spec.dscp & 0x3F) << 2) | (spec.ecn & 0b11));
+    packet.push((IP_VERSION_4 << 4i32) | IPV4_HEADER_WORDS);
+    packet.push(((spec.dscp & 0x3F) << 2i32) | (spec.ecn & 0b11));
     packet.extend_from_slice(&total_len.to_be_bytes());
     packet.extend_from_slice(&spec.identification.to_be_bytes());
     let flags = if spec.dont_fragment {
@@ -112,7 +115,7 @@ pub fn encode_ipv4_udp(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReceivedUdp<'a> {
+pub struct ReceivedUdp<'buf> {
     pub source: SocketAddrV4,
     pub destination: SocketAddrV4,
     pub dscp: u8,
@@ -122,8 +125,8 @@ pub struct ReceivedUdp<'a> {
     pub ttl: u8,
     pub udp_checksum: u16,
     /// UDP ヘッダを含む UDP セグメント全体（チェックサムの検証用）
-    pub udp_segment: &'a [u8],
-    pub payload: &'a [u8],
+    pub udp_segment: &'buf [u8],
+    pub payload: &'buf [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -142,21 +145,26 @@ pub enum IpDecodeError {
     BadUdpLength,
 }
 
+/// IPv4 / UDP のパケットを読む。
+///
+/// # Errors
+///
+/// 短すぎる・IPv4 でない・ヘッダ長が不正・UDP でない・断片化されている・UDP の長さが不正のとき。
 pub fn decode_ipv4_udp(bytes: &[u8]) -> Result<ReceivedUdp<'_>, IpDecodeError> {
     let fixed = bytes
-        .get(..IPV4_HEADER_LEN)
+        .first_chunk::<IPV4_HEADER_LEN>()
         .ok_or(IpDecodeError::TooShort)?;
-    let version = fixed[0] >> 4;
+    let version = fixed[0] >> 4i32;
     if version != IP_VERSION_4 {
         return Err(IpDecodeError::NotIpv4(version));
     }
     let header_len = usize::from(fixed[0] & 0x0F) * 4;
-    let total_len = usize::from(be_u16(&fixed[2..4]));
+    let total_len = usize::from(u16::from_be_bytes([fixed[2], fixed[3]]));
     if header_len < IPV4_HEADER_LEN || total_len < header_len {
         return Err(IpDecodeError::BadHeaderLength);
     }
     let packet = bytes.get(..total_len).ok_or(IpDecodeError::TooShort)?;
-    let flags = be_u16(&fixed[6..8]);
+    let flags = u16::from_be_bytes([fixed[6], fixed[7]]);
     if flags & FLAG_MORE_FRAGMENTS != 0 || flags & FRAGMENT_OFFSET_MASK != 0 {
         return Err(IpDecodeError::Fragmented);
     }
@@ -164,8 +172,10 @@ pub fn decode_ipv4_udp(bytes: &[u8]) -> Result<ReceivedUdp<'_>, IpDecodeError> {
         return Err(IpDecodeError::NotUdp(fixed[9]));
     }
     let udp = packet.get(header_len..).ok_or(IpDecodeError::TooShort)?;
-    let udp_header = udp.get(..UDP_HEADER_LEN).ok_or(IpDecodeError::TooShort)?;
-    let udp_len = usize::from(be_u16(&udp_header[4..6]));
+    let udp_header = udp
+        .first_chunk::<UDP_HEADER_LEN>()
+        .ok_or(IpDecodeError::TooShort)?;
+    let udp_len = usize::from(u16::from_be_bytes([udp_header[4], udp_header[5]]));
     if udp_len < UDP_HEADER_LEN {
         return Err(IpDecodeError::BadUdpLength);
     }
@@ -174,26 +184,34 @@ pub fn decode_ipv4_udp(bytes: &[u8]) -> Result<ReceivedUdp<'_>, IpDecodeError> {
     let source_ip = Ipv4Addr::new(fixed[12], fixed[13], fixed[14], fixed[15]);
     let destination_ip = Ipv4Addr::new(fixed[16], fixed[17], fixed[18], fixed[19]);
     Ok(ReceivedUdp {
-        source: SocketAddrV4::new(source_ip, be_u16(&udp_header[0..2])),
-        destination: SocketAddrV4::new(destination_ip, be_u16(&udp_header[2..4])),
+        source: SocketAddrV4::new(
+            source_ip,
+            u16::from_be_bytes([udp_header[0], udp_header[1]]),
+        ),
+        destination: SocketAddrV4::new(
+            destination_ip,
+            u16::from_be_bytes([udp_header[2], udp_header[3]]),
+        ),
         dscp: fixed[1] >> 2,
         ecn: fixed[1] & 0b11,
-        identification: be_u16(&fixed[4..6]),
+        identification: u16::from_be_bytes([fixed[4], fixed[5]]),
         dont_fragment: flags & FLAG_DONT_FRAGMENT != 0,
         ttl: fixed[8],
-        udp_checksum: be_u16(&udp_header[6..8]),
+        udp_checksum: u16::from_be_bytes([udp_header[6], udp_header[7]]),
         udp_segment,
         payload: &udp_segment[UDP_HEADER_LEN..],
     })
 }
 
 /// インターネットチェックサム（RFC 1071）。チェックサム欄を含めて計算すると、正しければ 0 になる。
+#[must_use]
 pub fn internet_checksum(data: &[u8]) -> u16 {
     fold(sum_words(data, 0))
 }
 
 /// UDP チェックサム（疑似ヘッダ込み）。`segment` は UDP ヘッダ + ペイロード。
 /// チェックサム欄を含めて計算すると、正しければ 0 になる。
+#[must_use]
 pub fn udp_checksum(source: Ipv4Addr, destination: Ipv4Addr, segment: &[u8]) -> u16 {
     let mut pseudo = [0u8; 12];
     pseudo[0..4].copy_from_slice(&source.octets());
@@ -212,15 +230,12 @@ fn sum_words(data: &[u8], initial: u64) -> u64 {
     })
 }
 
-fn fold(mut sum: u64) -> u16 {
+const fn fold(mut sum: u64) -> u16 {
     while sum > 0xFFFF {
-        sum = (sum & 0xFFFF) + (sum >> 16);
+        sum = (sum & 0xFFFF) + (sum >> 16i32);
     }
-    !(sum as u16)
-}
-
-fn be_u16(bytes: &[u8]) -> u16 {
-    u16::from_be_bytes([bytes[0], bytes[1]])
+    // ループを抜けた時点で sum は 0xFFFF 以下（マスクしても値は変わらない）
+    !((sum & 0xFFFF) as u16)
 }
 
 #[cfg(test)]
@@ -264,7 +279,7 @@ mod tests {
 
         assert_eq!(packet.len(), 20 + 8 + 48);
         assert_eq!(packet[0], 0x45);
-        assert_eq!(packet[1], (46 << 2) | 1);
+        assert_eq!(packet[1], (46 << 2i32) | 1);
         assert_eq!(&packet[2..4], &76u16.to_be_bytes());
         assert_eq!(&packet[4..6], &[0x12, 0x34]);
         assert_eq!(&packet[6..8], &[0x40, 0x00]);
@@ -375,7 +390,13 @@ mod tests {
             for value in [0x00, 0x0F, 0x45, 0x4F, 0xFF] {
                 let mut broken = packet.clone();
                 broken[index] = value;
-                let _ = decode_ipv4_udp(&broken);
+                // 壊れていても、読めたなら UDP のヘッダとペイロードの長さは合っている
+                if let Ok(received) = decode_ipv4_udp(&broken) {
+                    assert_eq!(
+                        received.payload.len() + UDP_HEADER_LEN,
+                        received.udp_segment.len()
+                    );
+                }
             }
         }
     }

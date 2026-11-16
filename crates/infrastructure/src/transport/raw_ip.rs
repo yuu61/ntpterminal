@@ -6,13 +6,16 @@
 //! - ガード用の UDP ソケット: 送信元ポートの確保、経路に合った送信元 IP の決定、
 //!   カーネルが応答に対して ICMP 到達不能を返すのを防ぐ
 //!
-//! root か CAP_NET_RAW が必要。Linux のカーネルは IP ヘッダのチェックサムと全長を常に書き換え、
+//! root か `CAP_NET_RAW` が必要。Linux のカーネルは IP ヘッダのチェックサムと全長を常に書き換え、
 //! Identification が 0 なら値を入れる。
 
-use std::io::{self, ErrorKind, Read};
-use std::net::{SocketAddr, SocketAddrV4, UdpSocket};
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use alloc::sync::Arc;
+use core::fmt;
+use core::net::{SocketAddr, SocketAddrV4};
+use core::time::Duration;
+use std::io::{self, ErrorKind, Read as _};
+use std::net::UdpSocket;
+use std::time::Instant;
 
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 use application::timestamping::TimestampingStatus;
@@ -23,10 +26,10 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 use super::kernel_ts::{KernelTimestamper, recv_with_timestamp};
 use super::udp::bind_connected;
 
-/// IPPROTO_RAW（IP ヘッダを含めて送る raw ソケット）。
+/// `IPPROTO_RAW`（IP ヘッダを含めて送る raw ソケット）。
 const IPPROTO_RAW: i32 = 255;
 /// 受信バッファ（IPv4 の最大長）。
-const RECV_BUFFER_LEN: usize = 65_535;
+const RECV_BUFFER_LEN: usize = 0xFFFF;
 
 pub struct RawIpTransport {
     send_socket: Socket,
@@ -40,21 +43,35 @@ pub struct RawIpTransport {
     kernel: Option<KernelTimestamper>,
 }
 
+impl fmt::Debug for RawIpTransport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("RawIpTransport")
+            .field("local", &self.local)
+            .field("server", &self.server)
+            .field("headers", &self.headers)
+            .finish_non_exhaustive()
+    }
+}
+
 impl RawIpTransport {
     /// `source_port` が 0 なら OS に任せる。
+    ///
+    /// # Errors
+    ///
+    /// ソケットを開けない（raw ソケットの権限がない）とき。
     pub fn connect(
         server: SocketAddr,
         source_port: u16,
         headers: HeaderTemplate,
         clock: Arc<dyn ClockPort>,
     ) -> io::Result<Self> {
-        let SocketAddr::V4(server) = server else {
+        let SocketAddr::V4(server_v4) = server else {
             return Err(io::Error::new(
                 ErrorKind::InvalidInput,
                 "raw-ip モードは IPv4 のサーバだけに対応しています",
             ));
         };
-        let guard = bind_connected(SocketAddr::V4(server), source_port)?;
+        let guard = bind_connected(server, source_port)?;
         guard.set_nonblocking(true)?;
         let SocketAddr::V4(local) = guard.local_addr()? else {
             return Err(io::Error::other("送信元アドレスが IPv4 ではありません"));
@@ -69,7 +86,7 @@ impl RawIpTransport {
             recv_socket,
             guard,
             local,
-            server,
+            server: server_v4,
             headers,
             clock,
             buf: vec![0; RECV_BUFFER_LEN],
@@ -77,7 +94,11 @@ impl RawIpTransport {
         })
     }
 
-    /// 受信は raw ソケット、送信は IPPROTO_RAW のソケットで取る。
+    /// 受信は raw ソケット、送信は `IPPROTO_RAW` のソケットで取る。
+    ///
+    /// # Errors
+    ///
+    /// ソケットにタイムスタンプの設定をできないとき。
     pub fn enable_kernel_timestamps(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()> {
         self.kernel = Some(KernelTimestamper::enable(
             &self.recv_socket,
@@ -88,7 +109,8 @@ impl RawIpTransport {
     }
 
     /// 送信元（IP ヘッダに入れているアドレスとポート）。
-    pub fn local_addr(&self) -> SocketAddrV4 {
+    #[must_use]
+    pub const fn local_addr(&self) -> SocketAddrV4 {
         self.local
     }
 
@@ -123,10 +145,11 @@ impl PacketPort for RawIpTransport {
         let packet = encode_ipv4_udp(&self.headers, self.local, self.server, payload);
         let destination = SockAddr::from(self.server);
         let sent = self.clock.now();
-        self.send_socket
+        let _: usize = self
+            .send_socket
             .send_to(&packet, &destination)
             .map_err(|error| TransportError::Io(error.to_string()))?;
-        if let Some(kernel) = &mut self.kernel {
+        if let Some(kernel) = self.kernel.as_mut() {
             return Ok(kernel.after_send(&self.send_socket, self.clock.as_ref(), sent));
         }
         Ok(sent)
@@ -152,10 +175,9 @@ impl PacketPort for RawIpTransport {
                     };
                     if packet.source == self.server && packet.destination == self.local {
                         // 受け入れるパケットだけについて、T4 の出どころを決める（記録も）
-                        let received = match &self.kernel {
-                            Some(kernel) => kernel.choose_received(kernel_time, observed),
-                            None => observed,
-                        };
+                        let received = self.kernel.as_ref().map_or(observed, |kernel| {
+                            kernel.choose_received(kernel_time, observed)
+                        });
                         return Ok(Some(Inbound {
                             payload: packet.payload.to_vec(),
                             received,

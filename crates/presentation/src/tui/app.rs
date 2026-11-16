@@ -1,12 +1,12 @@
 //! TUI のイベントループ。
 
+use core::time::Duration;
 use std::io;
-use std::sync::Arc;
 use std::sync::mpsc::Receiver;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, KeyCode, KeyEvent, KeyModifiers};
+use ratatui::{CompletedFrame, DefaultTerminal};
 
 use application::port::ClockPort;
 use application::snapshot::SyncSnapshot;
@@ -21,19 +21,23 @@ const FRAME_INTERVAL: Duration = Duration::from_millis(16);
 ///
 /// `clock` には同期スレッドと**同じインスタンス**を渡すこと。モノトニック時計の起点が違うと、
 /// 時刻基準のチェックでは検出できないまま基準点からの計算が狂う。
+///
+/// # Errors
+///
+/// 端末の準備・描画・キー入力の読み取り・後片付けのどれかに失敗したとき。
 pub fn run(
     config: &TuiConfig,
-    clock: Arc<dyn ClockPort>,
-    snapshots: Receiver<SyncSnapshot>,
+    clock: &dyn ClockPort,
+    snapshots: &Receiver<SyncSnapshot>,
 ) -> io::Result<()> {
     let mut terminal = match ratatui::try_init() {
         Ok(terminal) => terminal,
         Err(error) => {
-            let _ = ratatui::try_restore();
+            drop(ratatui::try_restore());
             return Err(error);
         }
     };
-    let result = event_loop(&mut terminal, config, clock.as_ref(), &snapshots);
+    let result = event_loop(&mut terminal, config, clock, snapshots);
     let restored = ratatui::try_restore();
     result.and(restored)
 }
@@ -53,9 +57,15 @@ fn event_loop(
             latest = Some(snapshot);
         }
         let now = clock.now().mono;
-        let shown = display.tick(latest.as_ref().and_then(|s| s.anchor.as_ref()), now);
+        let shown = display.tick(
+            latest
+                .as_ref()
+                .and_then(|snapshot| snapshot.anchor.as_ref()),
+            now,
+        );
         let model = screen::build(config, latest.as_ref(), shown, now);
-        terminal.draw(|frame| frame.render_widget(&model, frame.area()))?;
+        let _: CompletedFrame<'_> =
+            terminal.draw(|frame| frame.render_widget(&model, frame.area()))?;
 
         // 次のフレームの時刻まで入力を待つ（遅れたときは追いつこうとしない）
         next_frame += FRAME_INTERVAL;

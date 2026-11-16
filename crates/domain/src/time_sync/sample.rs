@@ -5,6 +5,7 @@ use crate::shared_kernel::{LocalStamp, NtpTimestamp, TimeDelta, TimebaseMismatch
 pub struct Offset(TimeDelta);
 
 impl Offset {
+    #[must_use]
     pub const fn delta(self) -> TimeDelta {
         self.0
     }
@@ -15,6 +16,7 @@ impl Offset {
 pub struct RoundTripDelay(TimeDelta);
 
 impl RoundTripDelay {
+    #[must_use]
     pub const fn delta(self) -> TimeDelta {
         self.0
     }
@@ -46,6 +48,10 @@ impl Sample {
     ///
     /// - delay はモノトニック時計（`mono`）から求める。T1 と T4 は同じ時刻基準でなければならない
     /// - offset は壁時計（`wall`）から求める
+    ///
+    /// # Errors
+    ///
+    /// T1 と T4 の時刻基準が違う、T3 < T2、または T4 < T1 のとき。
     pub fn new(
         sent: LocalStamp,
         server_receive: NtpTimestamp,
@@ -63,12 +69,10 @@ impl Sample {
         // PC とサーバの時計の進み方の差でごくわずかに負になりうるので、0 で下限を切る
         let delay = (local_round_trip - server_processing).max(TimeDelta::ZERO);
 
-        // offset = ((T2 − T1) + (T3 − T4)) / 2。和は i128 で計算する
+        // offset = ((T2 − T1) + (T3 − T4)) / 2。midpoint は和があふれず、/ 2 と同じく 0 方向に丸める
         let forward = server_receive.wrapping_since(sent.wall);
         let backward = server_transmit.wrapping_since(received.wall);
-        let offset = TimeDelta::from_i128_nanos(
-            (i128::from(forward.as_nanos()) + i128::from(backward.as_nanos())) / 2,
-        );
+        let offset = TimeDelta::from_nanos(i64::midpoint(forward.as_nanos(), backward.as_nanos()));
 
         Ok(Self {
             sent,
@@ -81,34 +85,41 @@ impl Sample {
     }
 
     /// T1: 送信時の PC の時刻
+    #[must_use]
     pub const fn sent(&self) -> LocalStamp {
         self.sent
     }
 
     /// T2: サーバが要求を受け取った時刻
+    #[must_use]
     pub const fn server_receive(&self) -> NtpTimestamp {
         self.server_receive
     }
 
     /// T3: サーバが応答を送った時刻
+    #[must_use]
     pub const fn server_transmit(&self) -> NtpTimestamp {
         self.server_transmit
     }
 
     /// T4: 受信時の PC の時刻
+    #[must_use]
     pub const fn received(&self) -> LocalStamp {
         self.received
     }
 
+    #[must_use]
     pub const fn offset(&self) -> Offset {
         self.offset
     }
 
+    #[must_use]
     pub const fn delay(&self) -> RoundTripDelay {
         self.delay
     }
 
     /// T4 の瞬間のサーバ時刻の推定値（T3 + 片道分の遅延）。
+    #[must_use]
     pub fn server_time_at_receive(&self) -> NtpTimestamp {
         self.server_transmit.wrapping_add(self.delay.0 / 2)
     }
@@ -124,7 +135,7 @@ mod tests {
     fn stamp(micros: i64) -> LocalStamp {
         let delta = TimeDelta::from_micros(micros);
         LocalStamp {
-            mono: PcTime::monotonic(delta.as_nanos() as u64),
+            mono: PcTime::monotonic(delta.as_nanos().cast_unsigned()),
             wall: WALL_BASE.wrapping_add(delta),
         }
     }

@@ -26,6 +26,7 @@ struct Shown {
 }
 
 impl DisplayClock {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
@@ -33,24 +34,21 @@ impl DisplayClock {
     /// `now`（モノトニック時計）の瞬間に表示する時刻。基準点がまだなければ `None`。
     pub fn tick(&mut self, anchor: Option<&Anchor>, now: PcTime) -> Option<NtpTimestamp> {
         let target = anchor?.project(now).ok()?;
-        let shown = match self.last {
-            None => target,
-            Some(last) => match now.since(last.mono) {
-                Ok(elapsed) if !elapsed.is_negative() => {
-                    let natural = last.time.wrapping_add(elapsed);
-                    let error = target.wrapping_since(natural);
-                    if error.abs() > STEP_THRESHOLD {
-                        target
-                    } else {
-                        let limit = elapsed * MAX_SLEW_PERCENT / 100;
-                        natural.wrapping_add(error.clamp(-limit, limit))
-                    }
+        let shown = self.last.map_or(target, |last| match now.since(last.mono) {
+            Ok(elapsed) if !elapsed.is_negative() => {
+                let natural = last.time.wrapping_add(elapsed);
+                let error = target.wrapping_since(natural);
+                if error.abs() > STEP_THRESHOLD {
+                    target
+                } else {
+                    let limit = elapsed * MAX_SLEW_PERCENT / 100;
+                    natural.wrapping_add(error.clamp(-limit, limit))
                 }
-                // 時刻が進んでいない（同じ瞬間に 2 回呼ばれた）: 前回と同じ値を出す
-                Ok(_) => last.time,
-                Err(_) => target,
-            },
-        };
+            }
+            // 時刻が進んでいない（同じ瞬間に 2 回呼ばれた）: 前回と同じ値を出す
+            Ok(_) => last.time,
+            Err(_) => target,
+        });
         self.last = Some(Shown {
             mono: now,
             time: shown,
@@ -78,7 +76,7 @@ mod tests {
     }
 
     fn mono(nanos: i64) -> PcTime {
-        PcTime::monotonic(nanos as u64)
+        PcTime::monotonic(nanos.cast_unsigned())
     }
 
     /// モノトニック時計 `at_nanos` の瞬間にサーバ時刻が `SERVER_BASE + server_offset` だった、という基準点。
@@ -99,10 +97,13 @@ mod tests {
 
     #[test]
     fn first_tick_shows_projection_exactly() {
-        let a = anchor(0, TimeDelta::ZERO);
+        let base = anchor(0, TimeDelta::ZERO);
         let mut clock = DisplayClock::new();
         let now = mono(250_000_000);
-        assert_eq!(clock.tick(Some(&a), now), Some(a.project(now).unwrap()));
+        assert_eq!(
+            clock.tick(Some(&base), now),
+            Some(base.project(now).unwrap())
+        );
     }
 
     /// 基準点が 5ms 過去側にずれても、表示は逆戻りせずに追いつく。
@@ -113,7 +114,7 @@ mod tests {
         let mut clock = DisplayClock::new();
         let mut now = TimeDelta::ZERO;
         let mut previous = clock.tick(Some(&old), mono(0)).unwrap();
-        for _ in 0..20 {
+        for _ in 0i32..20i32 {
             now = now + FRAME;
             let shown = clock.tick(Some(&new), mono(now.as_nanos())).unwrap();
             assert!(!shown.wrapping_since(previous).is_negative(), "逆戻りした");
@@ -150,7 +151,7 @@ mod tests {
         let old = anchor(0, TimeDelta::ZERO);
         let new = anchor(0, TimeDelta::from_millis(4));
         let mut clock = DisplayClock::new();
-        clock.tick(Some(&old), mono(0));
+        let _: Option<NtpTimestamp> = clock.tick(Some(&old), mono(0));
         let shown = clock.tick(Some(&new), mono(FRAME.as_nanos())).unwrap();
         let target = new.project(mono(FRAME.as_nanos())).unwrap();
         assert_close(shown.wrapping_since(target), TimeDelta::ZERO);
@@ -161,7 +162,7 @@ mod tests {
         let old = anchor(0, TimeDelta::ZERO);
         let new = anchor(0, TimeDelta::from_secs(-3));
         let mut clock = DisplayClock::new();
-        clock.tick(Some(&old), mono(0));
+        let _: Option<NtpTimestamp> = clock.tick(Some(&old), mono(0));
         let now = mono(FRAME.as_nanos());
         let shown = clock.tick(Some(&new), now).unwrap();
         assert_close(
@@ -172,9 +173,9 @@ mod tests {
 
     #[test]
     fn repeated_tick_at_same_instant_is_stable() {
-        let a = anchor(0, TimeDelta::ZERO);
+        let base = anchor(0, TimeDelta::ZERO);
         let mut clock = DisplayClock::new();
-        let first = clock.tick(Some(&a), mono(100));
-        assert_eq!(clock.tick(Some(&a), mono(100)), first);
+        let first = clock.tick(Some(&base), mono(100));
+        assert_eq!(clock.tick(Some(&base), mono(100)), first);
     }
 }

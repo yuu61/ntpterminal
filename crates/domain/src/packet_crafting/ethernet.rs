@@ -2,9 +2,9 @@
 //!
 //! 解析は任意の受信フレームに対して行うので、どんな入力でもパニックしない。
 
-use std::fmt;
-use std::net::Ipv4Addr;
-use std::str::FromStr;
+use alloc::fmt;
+use core::net::Ipv4Addr;
+use core::str::FromStr;
 
 /// Ethernet ヘッダの長さ（VLAN タグなし）。
 pub const ETHERNET_HEADER_LEN: usize = 14;
@@ -26,8 +26,8 @@ impl MacAddr {
 
 impl fmt::Display for MacAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let [a, b, c, d, e, g] = self.0;
-        write!(f, "{a:02x}:{b:02x}:{c:02x}:{d:02x}:{e:02x}:{g:02x}")
+        let [b0, b1, b2, b3, b4, b5] = self.0;
+        write!(f, "{b0:02x}:{b1:02x}:{b2:02x}:{b3:02x}:{b4:02x}:{b5:02x}")
     }
 }
 
@@ -39,6 +39,10 @@ impl FromStr for MacAddr {
     type Err = MacParseError;
 
     /// "aa:bb:cc:dd:ee:ff" または "aa-bb-cc-dd-ee-ff"。
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "16 進数の解析エラー（英語）は、形式を示す利用者向けの日本語の文言に置き換える"
+    )]
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let parts: Vec<&str> = text.split([':', '-']).collect();
         if parts.len() != 6 {
@@ -69,7 +73,7 @@ impl VlanTag {
         (u16::from(self.pcp & 0b111) << 13) | (u16::from(self.dei) << 12) | (self.vid & 0x0FFF)
     }
 
-    fn from_tci(tci: u16) -> Self {
+    const fn from_tci(tci: u16) -> Self {
         Self {
             pcp: (tci >> 13) as u8,
             dei: tci & 0x1000 != 0,
@@ -85,6 +89,7 @@ pub struct EthernetSpec {
 }
 
 /// Ethernet フレームを組み立てる。最小長（60 バイト）への詰め物はドライバに任せる。
+#[must_use]
 pub fn encode_ethernet(
     spec: &EthernetSpec,
     destination: MacAddr,
@@ -105,14 +110,14 @@ pub fn encode_ethernet(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct ReceivedFrame<'a> {
+pub struct ReceivedFrame<'buf> {
     pub destination: MacAddr,
     pub source: MacAddr,
     /// VLAN タグ（NIC がタグを外して渡すこともあるので、付いていないこともある）
     pub vlan: Option<VlanTag>,
     pub ethertype: u16,
     /// ヘッダより後ろ（詰め物を含むことがある）
-    pub payload: &'a [u8],
+    pub payload: &'buf [u8],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -122,22 +127,27 @@ pub enum FrameDecodeError {
 }
 
 /// VLAN タグは 1 段まで読む。
+///
+/// # Errors
+///
+/// ヘッダの長さに満たないとき。
 pub fn decode_ethernet(frame: &[u8]) -> Result<ReceivedFrame<'_>, FrameDecodeError> {
     let header = frame
-        .get(..ETHERNET_HEADER_LEN)
+        .first_chunk::<ETHERNET_HEADER_LEN>()
         .ok_or(FrameDecodeError::TooShort)?;
     let destination = MacAddr(mac_at(header, 0));
     let source = MacAddr(mac_at(header, 6));
-    let outer_type = be_u16(&header[12..14]);
+    let outer_type = u16::from_be_bytes([header[12], header[13]]);
     if outer_type == ETHERTYPE_VLAN {
         let tag = frame
-            .get(ETHERNET_HEADER_LEN..ETHERNET_HEADER_LEN + VLAN_TAG_LEN)
+            .get(ETHERNET_HEADER_LEN..)
+            .and_then(<[u8]>::first_chunk::<VLAN_TAG_LEN>)
             .ok_or(FrameDecodeError::TooShort)?;
         return Ok(ReceivedFrame {
             destination,
             source,
-            vlan: Some(VlanTag::from_tci(be_u16(&tag[0..2]))),
-            ethertype: be_u16(&tag[2..4]),
+            vlan: Some(VlanTag::from_tci(u16::from_be_bytes([tag[0], tag[1]]))),
+            ethertype: u16::from_be_bytes([tag[2], tag[3]]),
             payload: &frame[ETHERNET_HEADER_LEN + VLAN_TAG_LEN..],
         });
     }
@@ -165,7 +175,8 @@ pub struct ArpPacket {
 
 impl ArpPacket {
     /// 「`target_ip` を持っているのは誰？」という問い合わせ。
-    pub fn request(sender_mac: MacAddr, sender_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Self {
+    #[must_use]
+    pub const fn request(sender_mac: MacAddr, sender_ip: Ipv4Addr, target_ip: Ipv4Addr) -> Self {
         Self {
             operation: ARP_REQUEST,
             sender_mac,
@@ -176,6 +187,7 @@ impl ArpPacket {
     }
 }
 
+#[must_use]
 pub fn encode_arp(packet: &ArpPacket) -> Vec<u8> {
     let mut bytes = Vec::with_capacity(ARP_LEN);
     bytes.extend_from_slice(&1u16.to_be_bytes()); // ハードウェア種別: Ethernet
@@ -199,14 +211,23 @@ pub enum ArpDecodeError {
 }
 
 /// Ethernet / IPv4 の ARP だけを読む。
+///
+/// # Errors
+///
+/// 短すぎるとき、または Ethernet / IPv4 の ARP でないとき。
 pub fn decode_arp(bytes: &[u8]) -> Result<ArpPacket, ArpDecodeError> {
-    let arp = bytes.get(..ARP_LEN).ok_or(ArpDecodeError::TooShort)?;
-    if be_u16(&arp[0..2]) != 1 || be_u16(&arp[2..4]) != ETHERTYPE_IPV4 || arp[4] != 6 || arp[5] != 4
+    let arp = bytes
+        .first_chunk::<ARP_LEN>()
+        .ok_or(ArpDecodeError::TooShort)?;
+    if u16::from_be_bytes([arp[0], arp[1]]) != 1
+        || u16::from_be_bytes([arp[2], arp[3]]) != ETHERTYPE_IPV4
+        || arp[4] != 6
+        || arp[5] != 4
     {
         return Err(ArpDecodeError::Unsupported);
     }
     Ok(ArpPacket {
-        operation: be_u16(&arp[6..8]),
+        operation: u16::from_be_bytes([arp[6], arp[7]]),
         sender_mac: MacAddr(mac_at(arp, 8)),
         sender_ip: Ipv4Addr::new(arp[14], arp[15], arp[16], arp[17]),
         target_mac: MacAddr(mac_at(arp, 18)),
@@ -218,10 +239,6 @@ fn mac_at(bytes: &[u8], offset: usize) -> [u8; 6] {
     let mut mac = [0u8; 6];
     mac.copy_from_slice(&bytes[offset..offset + 6]);
     mac
-}
-
-fn be_u16(bytes: &[u8]) -> u16 {
-    u16::from_be_bytes([bytes[0], bytes[1]])
 }
 
 #[cfg(test)]
@@ -236,9 +253,18 @@ mod tests {
         assert_eq!("00:11:22:33:44:55".parse(), Ok(DST));
         assert_eq!("66-77-88-99-aa-bb".parse(), Ok(SRC));
         assert_eq!(SRC.to_string(), "66:77:88:99:aa:bb");
-        assert!("00:11:22:33:44".parse::<MacAddr>().is_err());
-        assert!("00:11:22:33:44:5".parse::<MacAddr>().is_err());
-        assert!("00:11:22:33:44:zz".parse::<MacAddr>().is_err());
+        assert_eq!(
+            "00:11:22:33:44".parse::<MacAddr>().unwrap_err(),
+            MacParseError
+        );
+        assert_eq!(
+            "00:11:22:33:44:5".parse::<MacAddr>().unwrap_err(),
+            MacParseError
+        );
+        assert_eq!(
+            "00:11:22:33:44:zz".parse::<MacAddr>().unwrap_err(),
+            MacParseError
+        );
     }
 
     #[test]
@@ -314,24 +340,27 @@ mod tests {
                 vid: 1,
             }),
         };
-        let frame = encode_ethernet(
-            &spec,
-            DST,
-            SRC,
-            ETHERTYPE_ARP,
-            &encode_arp(&ArpPacket::request(
-                SRC,
-                Ipv4Addr::LOCALHOST,
-                Ipv4Addr::LOCALHOST,
-            )),
-        );
+        let request = ArpPacket::request(SRC, Ipv4Addr::LOCALHOST, Ipv4Addr::LOCALHOST);
+        let frame = encode_ethernet(&spec, DST, SRC, ETHERTYPE_ARP, &encode_arp(&request));
         for len in 0..frame.len() {
-            if let Ok(decoded) = decode_ethernet(&frame[..len]) {
-                let _ = decode_arp(decoded.payload);
+            if let Ok(decoded) = decode_ethernet(&frame[..len])
+                && let Ok(arp) = decode_arp(decoded.payload)
+            {
+                // 途中で切れていても、読めたなら送った要求そのもの
+                assert_eq!(arp, request, "長さ {len}");
             }
         }
-        assert!(decode_ethernet(&frame[..13]).is_err());
-        assert!(decode_ethernet(&frame[..17]).is_err());
-        assert!(decode_arp(&[0u8; 27]).is_err());
+        assert_eq!(
+            decode_ethernet(&frame[..13]).unwrap_err(),
+            FrameDecodeError::TooShort
+        );
+        assert_eq!(
+            decode_ethernet(&frame[..17]).unwrap_err(),
+            FrameDecodeError::TooShort
+        );
+        assert_eq!(
+            decode_arp(&[0u8; 27]).unwrap_err(),
+            ArpDecodeError::TooShort
+        );
     }
 }

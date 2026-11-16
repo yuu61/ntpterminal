@@ -1,6 +1,6 @@
 //! 集約ルート [`TimeSource`]（時刻源 = サーバ 1 台）。
 
-use std::ops::RangeInclusive;
+use core::ops::RangeInclusive;
 
 use super::{
     Anchor, ClockFilter, KissCode, LeapIndicator, ReferenceId, RejectReason, Sample, ServerInfo,
@@ -30,13 +30,14 @@ pub struct SourceConfig {
 
 impl SourceConfig {
     /// ポーリング間隔から、ほかの値を妥当な既定値で決める。
+    #[must_use]
     pub fn with_poll_interval(poll_interval: TimeDelta) -> Self {
-        let poll_interval = poll_interval.max(TimeDelta::from_millis(10));
+        let interval = poll_interval.max(TimeDelta::from_millis(10));
         Self {
-            poll_interval,
-            max_poll_interval: poll_interval.max(TimeDelta::from_secs(64)),
-            response_timeout: poll_interval.min(TimeDelta::from_secs(1)),
-            stale_after: (poll_interval * 4).max(TimeDelta::from_secs(2)),
+            poll_interval: interval,
+            max_poll_interval: interval.max(TimeDelta::from_secs(64)),
+            response_timeout: interval.min(TimeDelta::from_secs(1)),
+            stale_after: (interval * 4).max(TimeDelta::from_secs(2)),
             filter_len: 8,
         }
     }
@@ -92,6 +93,7 @@ pub struct TimeSource {
 
 impl TimeSource {
     /// `now` の時点ですぐに最初の問い合わせを行う状態で作る。
+    #[must_use]
     pub fn new(config: SourceConfig, now: PcTime) -> Self {
         Self {
             config,
@@ -111,49 +113,60 @@ impl TimeSource {
 
     // ---- 参照 ----
 
-    pub fn config(&self) -> &SourceConfig {
+    #[must_use]
+    pub const fn config(&self) -> &SourceConfig {
         &self.config
     }
 
-    pub fn state(&self) -> SyncState {
+    #[must_use]
+    pub const fn state(&self) -> SyncState {
         self.state
     }
 
-    pub fn stats(&self) -> ExchangeStats {
+    #[must_use]
+    pub const fn stats(&self) -> ExchangeStats {
         self.stats
     }
 
     /// 現在のポーリング間隔（KoD RATE で延びることがある）。
-    pub fn poll_interval(&self) -> TimeDelta {
+    #[must_use]
+    pub const fn poll_interval(&self) -> TimeDelta {
         self.poll_interval
     }
 
     /// 大きい時計の表示に使う基準点（クロックフィルタが選んだ標本から作る）。
-    pub fn anchor(&self) -> Option<Anchor> {
+    #[must_use]
+    pub const fn anchor(&self) -> Option<Anchor> {
         self.anchor
     }
 
-    pub fn last_sample(&self) -> Option<Sample> {
+    #[must_use]
+    pub const fn last_sample(&self) -> Option<Sample> {
         self.last_sample
     }
 
     /// クロックフィルタが選んだ標本（直近の中で往復遅延が最小）。
+    #[must_use]
     pub fn selected_sample(&self) -> Option<Sample> {
         self.filter.best().copied()
     }
 
-    pub fn server_info(&self) -> Option<ServerInfo> {
+    #[must_use]
+    pub const fn server_info(&self) -> Option<ServerInfo> {
         self.server_info
     }
 
-    pub fn last_success(&self) -> Option<PcTime> {
+    #[must_use]
+    pub const fn last_success(&self) -> Option<PcTime> {
         self.last_success
     }
 
-    pub fn is_awaiting_reply(&self) -> bool {
+    #[must_use]
+    pub const fn is_awaiting_reply(&self) -> bool {
         self.pending.is_some()
     }
 
+    #[must_use]
     pub fn deadlines(&self) -> Deadlines {
         Deadlines {
             next_poll: self.next_poll,
@@ -167,6 +180,7 @@ impl TimeSource {
         }
     }
 
+    #[must_use]
     pub fn is_poll_due(&self, now: PcTime) -> bool {
         self.next_poll
             .is_some_and(|at| now.is_at_or_after(at).unwrap_or(false))
@@ -372,7 +386,7 @@ mod tests {
     fn stamp(micros: i64) -> LocalStamp {
         let delta = TimeDelta::from_micros(micros);
         LocalStamp {
-            mono: PcTime::monotonic(delta.as_nanos() as u64),
+            mono: PcTime::monotonic(delta.as_nanos().cast_unsigned()),
             wall: WALL_BASE.wrapping_add(delta),
         }
     }
@@ -419,7 +433,7 @@ mod tests {
 
     fn rejected_reason(events: &[SyncEvent]) -> RejectReason {
         match events.first() {
-            Some(SyncEvent::SampleRejected { reason, .. }) => *reason,
+            Some(&SyncEvent::SampleRejected { reason, .. }) => reason,
             other => panic!("SampleRejected ではありません: {other:?}"),
         }
     }
@@ -467,7 +481,7 @@ mod tests {
     #[test]
     fn ignores_reply_with_wrong_origin_and_keeps_waiting() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
         let events = src.complete_exchange(reply(nonce(99), 0, 0, 100), stamp(200));
         assert_eq!(
             events,
@@ -479,9 +493,9 @@ mod tests {
         assert!(src.is_awaiting_reply());
         assert_eq!(src.stats().strays, 1);
 
-        let events = src.complete_exchange(reply(nonce(1), 0, 0, 100), stamp(300));
+        let accepted = src.complete_exchange(reply(nonce(1), 0, 0, 100), stamp(300));
         assert!(matches!(
-            events[0],
+            accepted[0],
             SyncEvent::SampleAccepted { seq: 1, .. }
         ));
     }
@@ -500,23 +514,29 @@ mod tests {
     #[test]
     fn validates_reply_fields() {
         let cases: Vec<(Corruption, RejectReason)> = vec![
-            (|r| r.mode = 3, RejectReason::UnexpectedMode(3)),
-            (|r| r.version = 2, RejectReason::UnsupportedVersion(2)),
-            (|r| r.leap = 3, RejectReason::ServerUnsynchronized),
-            (|r| r.stratum = 16, RejectReason::ServerUnsynchronized),
-            (|r| r.stratum = 17, RejectReason::InvalidStratum(17)),
+            (|reply| reply.mode = 3, RejectReason::UnexpectedMode(3)),
             (
-                |r| r.transmit = NtpTimestamp::ZERO,
+                |reply| reply.version = 2,
+                RejectReason::UnsupportedVersion(2),
+            ),
+            (|reply| reply.leap = 3, RejectReason::ServerUnsynchronized),
+            (
+                |reply| reply.stratum = 16,
+                RejectReason::ServerUnsynchronized,
+            ),
+            (|reply| reply.stratum = 17, RejectReason::InvalidStratum(17)),
+            (
+                |reply| reply.transmit = NtpTimestamp::ZERO,
                 RejectReason::ZeroTransmitTimestamp,
             ),
             (
-                |r| r.transmit = r.receive.wrapping_add(TimeDelta::from_micros(-1)),
+                |reply| reply.transmit = reply.receive.wrapping_add(TimeDelta::from_micros(-1)),
                 RejectReason::InvalidSample(SampleError::ServerTimeReversed),
             ),
         ];
         for (mutate, expected) in cases {
             let mut src = source();
-            src.begin_exchange(nonce(1), stamp(0));
+            drop(src.begin_exchange(nonce(1), stamp(0)));
             let mut bad = reply(nonce(1), 0, 0, 100);
             mutate(&mut bad);
             let events = src.complete_exchange(bad, stamp(200));
@@ -535,7 +555,7 @@ mod tests {
     #[test]
     fn kiss_of_death_rate_doubles_poll_interval() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
         let mut kod = reply(nonce(1), 0, 0, 100);
         kod.stratum = 0;
         kod.reference_id = *b"RATE";
@@ -558,7 +578,7 @@ mod tests {
     #[test]
     fn kiss_of_death_deny_stops_polling() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
         let mut kod = reply(nonce(1), 0, 0, 100);
         kod.stratum = 0;
         kod.reference_id = *b"DENY";
@@ -575,8 +595,8 @@ mod tests {
     #[test]
     fn times_out_pending_exchange_on_tick() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
-        assert!(src.on_tick(stamp(499_999).mono).is_empty());
+        drop(src.begin_exchange(nonce(1), stamp(0)));
+        assert_eq!(src.on_tick(stamp(499_999).mono), Vec::new());
         assert_eq!(
             src.on_tick(stamp(500_000).mono),
             vec![SyncEvent::ExchangeTimedOut { seq: 1 }]
@@ -588,7 +608,7 @@ mod tests {
     #[test]
     fn new_poll_while_pending_counts_previous_as_timeout() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
         assert_eq!(
             src.begin_exchange(nonce(2), stamp(500_000)),
             vec![
@@ -606,7 +626,7 @@ mod tests {
     #[test]
     fn transport_failure_ends_pending_exchange() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
         assert_eq!(
             src.fail_exchange("到達不能".into()),
             vec![SyncEvent::ExchangeFailed {
@@ -621,13 +641,13 @@ mod tests {
     #[test]
     fn enters_holdover_when_replies_stop() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
-        src.complete_exchange(reply(nonce(1), 0, 0, 100), stamp(200));
+        drop(src.begin_exchange(nonce(1), stamp(0)));
+        drop(src.complete_exchange(reply(nonce(1), 0, 0, 100), stamp(200)));
         assert_eq!(src.state(), SyncState::Synchronized);
 
         let stale_at = stamp(200 + 2_000_000).mono;
         assert_eq!(src.deadlines().stale, Some(stale_at));
-        assert!(src.on_tick(stamp(200 + 1_999_999).mono).is_empty());
+        assert_eq!(src.on_tick(stamp(200 + 1_999_999).mono), Vec::new());
         assert_eq!(
             src.on_tick(stale_at),
             vec![SyncEvent::StateChanged {
@@ -642,10 +662,10 @@ mod tests {
     #[test]
     fn anchor_follows_minimum_delay_sample() {
         let mut src = source();
-        src.begin_exchange(nonce(1), stamp(0));
-        src.complete_exchange(reply(nonce(1), 0, 0, 1_000), stamp(2_000)); // delay 2ms
-        src.begin_exchange(nonce(2), stamp(500_000));
-        src.complete_exchange(reply(nonce(2), 500_000, 0, 2_000), stamp(504_000)); // delay 4ms
+        drop(src.begin_exchange(nonce(1), stamp(0)));
+        drop(src.complete_exchange(reply(nonce(1), 0, 0, 1_000), stamp(2_000))); // delay 2ms
+        drop(src.begin_exchange(nonce(2), stamp(500_000)));
+        drop(src.complete_exchange(reply(nonce(2), 500_000, 0, 2_000), stamp(504_000))); // delay 4ms
         assert_close(
             src.selected_sample().unwrap().delay().delta(),
             TimeDelta::from_millis(2),

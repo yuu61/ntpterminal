@@ -25,7 +25,140 @@ serde_json = "1.0.154"
 socket2 = { version = "0.6.5", features = ["all"] }
 thiserror = "2.0.21"
 
+[workspace.lints.rust]
+# rustc の lint のうち既定で無効なものも、すべて有効にする（まとめて有効にするグループがないので列挙する）。
+# `rustc -W help` で既定が allow の lint から、次のものだけを外している（基準は下の clippy の節と同じ）:
+#   missing_docs            [2] 直前の整理（冗長なコメントを削る）と逆に、公開の項目すべてに doc を求める
+#   dead_code_pub_in_binary [4] ライブラリの公開 API が、そのテスト用バイナリの中では「使われていない」と判定される
+#                               （コードでは直せない）
+#   unstable の lint（stable の rustc では unknown_lints になる）: deprecated_llvm_intrinsic、
+#     implicit_provenance_casts、multiple_supertrait_upcastable、must_not_suspend、non_exhaustive_omitted_patterns、
+#     resolving_to_items_shadowing_supertrait_items、shadowing_supertrait_items、unqualified_local_imports
+# unsafe_code は infrastructure の unsafe ブロックごとに #[expect] で理由を書かせるために有効にする。
+absolute_paths_not_starting_with_crate = "warn"
+ambiguous_negative_literals = "warn"
+closure_returning_async_block = "warn"
+deprecated_in_future = "warn"
+deprecated_safe_2024 = "warn"
+deref_into_dyn_supertrait = "warn"
+edition_2024_expr_fragment_specifier = "warn"
+elided_lifetimes_in_paths = "warn"
+explicit_outlives_requirements = "warn"
+ffi_unwind_calls = "warn"
+if_let_rescope = "warn"
+impl_trait_overcaptures = "warn"
+impl_trait_redundant_captures = "warn"
+keyword_idents_2018 = "warn"
+keyword_idents_2024 = "warn"
+let_underscore_drop = "warn"
+linker_info = "warn"
+macro_use_extern_crate = "warn"
+meta_variable_misuse = "warn"
+missing_copy_implementations = "warn"
+missing_debug_implementations = "warn"
+missing_unsafe_on_extern = "warn"
+non_ascii_idents = "warn"
+raw_borrows_via_references = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+rust_2021_incompatible_closure_captures = "warn"
+rust_2021_incompatible_or_patterns = "warn"
+rust_2021_prefixes_incompatible_syntax = "warn"
+rust_2021_prelude_collisions = "warn"
+rust_2024_guarded_string_incompatible_syntax = "warn"
+rust_2024_incompatible_pat = "warn"
+rust_2024_prelude_collisions = "warn"
+single_use_lifetimes = "warn"
+tail_expr_drop_order = "warn"
+trivial_casts = "warn"
+trivial_numeric_casts = "warn"
+unit_bindings = "warn"
+unnameable_types = "warn"
+unreachable_pub = "warn"
+unsafe_attr_outside_unsafe = "warn"
+unsafe_code = "warn"
+unsafe_op_in_unsafe_fn = "warn"
+unstable_features = "warn"
+unused_crate_dependencies = "warn"
+unused_extern_crates = "warn"
+unused_import_braces = "warn"
+unused_lifetimes = "warn"
+unused_macro_rules = "warn"
+unused_qualifications = "warn"
+unused_results = "warn"
+variant_size_differences = "warn"
+
+[workspace.lints.rustdoc]
+# rustdoc の lint もすべて有効にする（既定で無効の missing_crate_level_docs・private_doc_tests・unescaped_backticks を含む）
+all = "warn"
+
 [workspace.lints.clippy]
+# clippy の lint はすべてのグループを有効にし、合わないものだけを理由付きで外す。CI では -D warnings でエラーになる。
+# 外す基準（各行の [n] はこの番号）:
+#   [1] 有効にしている別の lint と矛盾する
+#   [2] プロジェクトの前提や決まり（CLAUDE.md、日本語の文言、publish = false）と矛盾する
+#   [3] 直すと NTP・パケットの計算の意味が変わるか、計算式が読めなくなる
+#   [4] やむを得ない例外（#[expect]）が 3 件を超える
+# コードの中で lint を外すのはやむを得ない場合だけ。`#[expect(lint, reason = "…")]` を使う（`#[allow]` はエラー）。
+# 新しい clippy では restriction の lint が増えるので、CI のツールチェーンを上げたら警告を見直す。
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+cargo = { level = "warn", priority = -1 }
+restriction = { level = "warn", priority = -1 }
+# restriction をまとめて有効にしたこと自体への警告（意図して有効にしている）
+blanket_clippy_restriction_lints = "allow"
+
+# ---- 外すもの ----
+# [1] needless_return（暗黙の return を求める）と矛盾する
+implicit_return = "allow"
+# [1] question_mark（? を使うよう求める）と矛盾する
+question_mark_used = "allow"
+# [1] mod_module_files（`foo.rs` + `foo/` 形式を求める）と矛盾する
+self_named_module_files = "allow"
+# [1] separated_literal_suffix と矛盾する。接尾辞は `0u8` のように続けて書く
+unseparated_literal_suffix = "allow"
+# [1] 1 回しか呼ばない関数も、名前を付けて切り出す（too_many_lines・cognitive_complexity と矛盾する）
+single_call_fn = "allow"
+# [1] unneeded_field_pattern（使わないフィールドは `..` にまとめる）と矛盾する
+rest_pattern_accessible_field = "allow"
+# [1] rustc の unreachable_pub・unnameable_types（外から見えない項目は pub(crate) にする）と矛盾する
+redundant_pub_crate = "allow"
+# [1] pub_without_shorthand（`pub(in crate)` ではなく `pub(crate)` と書く）と矛盾する
+pub_with_shorthand = "allow"
+# [2] 日本語の文言とコメントを使う（「。」を段落の終わりと認識しない、非 ASCII の文字列を禁じる）
+doc_paragraphs_missing_punctuation = "allow"
+non_ascii_literal = "allow"
+# [2] 直前の整理（冗長なコメントを削る）と逆に、private な項目すべてに doc を求める
+missing_docs_in_private_items = "allow"
+# [2] publish = false のワークスペースなので、公開ライブラリ向けの互換性・最適化の lint は当てはまらない
+exhaustive_enums = "allow"
+exhaustive_structs = "allow"
+missing_inline_in_public_items = "allow"
+# [2] 層ごとのモジュールの入口で `pub use` して公開する設計
+pub_use = "allow"
+# [2] 結合テストは Cargo の慣例どおり tests/ に置く
+tests_outside_test_module = "allow"
+# [2] NtpTimestamp・TimeDelta などドメインの用語（CLAUDE.md）を型名にそのまま使う
+module_name_repetitions = "allow"
+# [3] 並べ替えると enum の順序（derive した Ord）や構造体の並びが変わる
+arbitrary_source_item_ordering = "allow"
+# [3] NTP の固定小数点・ラップする時刻・パケットのバイト操作は、素の演算・`as`・添字で書く
+arithmetic_side_effects = "allow"
+as_conversions = "allow"
+float_arithmetic = "allow"
+indexing_slicing = "allow"
+integer_division = "allow"
+integer_division_remainder_used = "allow"
+# [3] ネットワークバイトオーダー（ビッグエンディアン）とカーネルの構造体（ホストのバイトオーダー）を扱う
+big_endian_bytes = "allow"
+host_endian_bytes = "allow"
+# [3] 整数の時間（ナノ秒）や回数を表示・統計のために f64 にする。丸めは避けられず、損失のない変換もない
+cast_precision_loss = "allow"
+
+# ---- 設計の決まりを守らせるもの（ローカルでもエラーにする） ----
+# lint を個別に外すときは `#[expect(lint, reason = "…")]` を使う（不要になると警告が出る）
+allow_attributes = "deny"
+allow_attributes_without_reason = "deny"
 # module は `foo.rs` + `foo/` 形式に統一する（`mod.rs` 禁止）
 mod_module_files = "deny"
 # unsafe には必ず SAFETY コメントを付ける（unsafe は infrastructure だけで許可）

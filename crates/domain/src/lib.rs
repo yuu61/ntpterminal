@@ -8,6 +8,8 @@
 //! 両者の翻訳は application 層の ACL（腐敗防止層）が担う。
 #![forbid(unsafe_code)]
 
+extern crate alloc;
+
 pub mod packet_crafting;
 pub mod shared_kernel;
 pub mod time_sync;

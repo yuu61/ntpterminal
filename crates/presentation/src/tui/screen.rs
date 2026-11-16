@@ -29,14 +29,14 @@ const NO_VALUE: &str = "--";
 const STATUS_MARK: &str = "●";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InfoRow {
+pub(crate) struct InfoRow {
     pub label: &'static str,
     pub value: String,
     pub color: Color,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ScreenModel {
+pub(crate) struct ScreenModel {
     pub title: String,
     pub server: String,
     /// 大きい時計の文字列（"17:25:45.146"）
@@ -54,28 +54,28 @@ pub struct ScreenModel {
 ///
 /// - `shown`: 大きい時計に出す時刻（[`domain::time_sync::DisplayClock`] の結果）
 /// - `now`: モノトニック時計の現在値（「何秒前」「何秒後」の計算に使う）
-pub fn build(
+pub(super) fn build(
     config: &TuiConfig,
     snapshot: Option<&SyncSnapshot>,
     shown: Option<NtpTimestamp>,
     now: PcTime,
 ) -> ScreenModel {
-    let state = snapshot.map_or(SyncState::Unsynchronized, |s| s.state);
+    let state = snapshot.map_or(SyncState::Unsynchronized, |snap| snap.state);
     let (status, status_color) = match state {
-        SyncState::Synchronized => (state_label(state).to_string(), theme::GOOD),
-        SyncState::Unsynchronized => ("応答待ち（未同期）".to_string(), theme::LABEL),
-        SyncState::Holdover => (state_label(state).to_string(), theme::WARN),
-        SyncState::Denied => (state_label(state).to_string(), theme::BAD),
+        SyncState::Synchronized => (state_label(state).to_owned(), theme::GOOD),
+        SyncState::Unsynchronized => ("応答待ち（未同期）".to_owned(), theme::LABEL),
+        SyncState::Holdover => (state_label(state).to_owned(), theme::WARN),
+        SyncState::Denied => (state_label(state).to_owned(), theme::BAD),
     };
     ScreenModel {
         title: config.title.clone(),
         server: config.server_label.clone(),
         clock: shown.map_or_else(
-            || CLOCK_PLACEHOLDER.to_string(),
+            || CLOCK_PLACEHOLDER.to_owned(),
             |time| format_clock(time, &config.zone),
         ),
         date: shown.map(|time| format_date(time, &config.zone)),
-        zone_label: config.zone.label().to_string(),
+        zone_label: config.zone.label().to_owned(),
         status,
         status_color,
         rows: info_rows(config, snapshot, now),
@@ -85,20 +85,20 @@ pub fn build(
 
 fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -> Vec<InfoRow> {
     // offset と delay は、基準点と同じ「クロックフィルタが選んだ標本」の値を出す（生の値は揺れる）
-    let selected = snapshot.and_then(|s| s.selected_sample);
-    let last = snapshot.and_then(|s| s.last_sample);
-    let info = snapshot.and_then(|s| s.server_info);
+    let selected = snapshot.and_then(|snap| snap.selected_sample);
+    let last = snapshot.and_then(|snap| snap.last_sample);
+    let info = snapshot.and_then(|snap| snap.server_info);
 
     let row = |label, value: Option<String>, color| InfoRow {
         label,
-        value: value.unwrap_or_else(|| NO_VALUE.to_string()),
+        value: value.unwrap_or_else(|| NO_VALUE.to_owned()),
         color,
     };
-    let offset = selected.map(|s| s.offset().delta());
-    let delay = selected.map(|s| s.delay().delta());
+    let offset = selected.map(|sample| sample.offset().delta());
+    let delay = selected.map(|sample| sample.delay().delta());
     let next_poll = match snapshot {
-        Some(s) if s.state == SyncState::Denied => Some("停止中".to_string()),
-        Some(s) => s
+        Some(snap) if snap.state == SyncState::Denied => Some("停止中".to_owned()),
+        Some(snap) => snap
             .next_poll
             .and_then(|at| at.since(now).ok())
             .map(|remaining| format!("{:.1} 秒後", remaining.max(TimeDelta::ZERO).as_secs_f64())),
@@ -137,13 +137,13 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
         ),
         row(
             "サーバ時刻",
-            last.map(|s| format_clock(s.server_transmit(), &config.zone)),
+            last.map(|sample| format_clock(sample.server_transmit(), &config.zone)),
             theme::TEXT,
         ),
         row(
             "最終同期",
             snapshot
-                .and_then(|s| s.last_success)
+                .and_then(|snap| snap.last_success)
                 .and_then(|at| now.since(at).ok())
                 .map(|elapsed| format!("{:.1} 秒前", elapsed.max(TimeDelta::ZERO).as_secs_f64())),
             theme::TEXT,
@@ -151,7 +151,7 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
         row("次回取得", next_poll, theme::TEXT),
         row(
             "成功/試行",
-            snapshot.map(|s| format!("{}/{}", s.stats.successes, s.stats.attempts)),
+            snapshot.map(|snap| format!("{}/{}", snap.stats.successes, snap.stats.attempts)),
             theme::TEXT,
         ),
         row("送信方式", Some(config.transport.clone()), theme::LABEL),
@@ -164,7 +164,7 @@ fn info_rows(config: &TuiConfig, snapshot: Option<&SyncSnapshot>, now: PcTime) -
             };
             row(
                 "タイムスタンプ",
-                Some(timestamping_label(&counts).to_string()),
+                Some(timestamping_label(&counts).to_owned()),
                 color,
             )
         },
@@ -198,7 +198,7 @@ fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
         return;
     }
     let x = area.x + area.width.saturating_sub(width_of(line)) / 2;
-    buf.set_line(x, y, line, area.right().saturating_sub(x));
+    let _: (u16, u16) = buf.set_line(x, y, line, area.right().saturating_sub(x));
 }
 
 /// 座標の計算はすべて `u16` の飽和演算（`saturating_*`）で行う。端末を極端に縮めてもパニックしないように。
@@ -207,7 +207,7 @@ impl Widget for &ScreenModel {
         // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 / (空行 / 最下部の一文)
         let rows = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
         let footer_rows = if self.footer.is_some() { 2 } else { 0 };
-        let fixed = 6_u16.saturating_add(rows).saturating_add(footer_rows);
+        let fixed = 6u16.saturating_add(rows).saturating_add(footer_rows);
 
         // 時計は残りの高さと幅に収まる最大の倍率で描く。倍率 1 でも入らなければ普通の文字で出す
         let scale = big_digits::fit_scale(
@@ -215,7 +215,7 @@ impl Widget for &ScreenModel {
             area.width.saturating_sub(2),
             area.height.saturating_sub(fixed),
         );
-        let clock_height = scale.map_or(1, |s| big_digits::size(&self.clock, s).1);
+        let clock_height = scale.map_or(1, |factor| big_digits::size(&self.clock, factor).1);
         let total = fixed.saturating_add(clock_height);
         let mut y = area.y + area.height.saturating_sub(total) / 2;
 
@@ -236,17 +236,17 @@ impl Widget for &ScreenModel {
         y = y.saturating_add(2);
 
         match scale {
-            Some(scale) => {
-                let (width, height) = big_digits::size(&self.clock, scale);
+            Some(factor) => {
+                let (width, height) = big_digits::size(&self.clock, factor);
                 let x = area.x + area.width.saturating_sub(width) / 2;
                 let clock_area = Rect::new(x, y, width, height).intersection(area);
-                BigText::new(&self.clock, scale, theme::ACCENT).render(clock_area, buf);
+                BigText::new(&self.clock, factor, theme::ACCENT).render(clock_area, buf);
             }
             None => put_centered(buf, area, y, &Line::styled(self.clock.as_str(), accent)),
         }
         y = y.saturating_add(clock_height).saturating_add(1);
 
-        if let Some(date) = &self.date {
+        if let Some(date) = self.date.as_ref() {
             let line = Line::from(vec![
                 Span::styled(date.as_str(), Style::new().fg(theme::TEXT)),
                 Span::raw("  "),
@@ -267,7 +267,7 @@ impl Widget for &ScreenModel {
 
         y = render_info_rows(&self.rows, area, y, buf);
 
-        if let Some(footer) = &self.footer {
+        if let Some(footer) = self.footer.as_ref() {
             let line = Line::styled(footer.as_str(), Style::new().fg(theme::FOOTER));
             put_centered(buf, area, y.saturating_add(1), &line);
         }
@@ -295,14 +295,14 @@ fn render_info_rows(rows: &[InfoRow], area: Rect, mut y: u16, buf: &mut Buffer) 
             break;
         }
         let max_width = area.right().saturating_sub(x);
-        buf.set_span(
+        let _: (u16, u16) = buf.set_span(
             x,
             y,
             &Span::styled(row.label, Style::new().fg(theme::LABEL)),
             max_width,
         );
         if value_x < area.right() {
-            buf.set_span(
+            let _: (u16, u16) = buf.set_span(
                 value_x,
                 y,
                 &Span::styled(row.value.as_str(), Style::new().fg(row.color)),
@@ -318,7 +318,9 @@ fn render_info_rows(rows: &[InfoRow], area: Rect, mut y: u16, buf: &mut Buffer) 
 mod tests {
     use super::*;
     use crate::format::{DisplayZone, display_width};
-    use domain::shared_kernel::{LocalStamp, NtpTimestamp};
+    use alloc::sync::Arc;
+    use application::timestamping::TimestampingStatus;
+    use domain::shared_kernel::LocalStamp;
     use domain::time_sync::{
         Anchor, ExchangeStats, LeapIndicator, ReferenceId, Sample, ServerInfo, Stratum,
     };
@@ -326,7 +328,7 @@ mod tests {
     /// 2026-11-15 17:25:37.923 JST
     fn server_time() -> NtpTimestamp {
         let unix_nanos =
-            (20_772_i128 * 86_400 + 8 * 3600 + 25 * 60 + 37) * 1_000_000_000 + 923_000_000;
+            (20_772i128 * 86_400 + 8 * 3600 + 25 * 60 + 37) * 1_000_000_000 + 923_000_000;
         NtpTimestamp::from_unix_nanos(unix_nanos)
     }
 
@@ -334,10 +336,10 @@ mod tests {
         TuiConfig {
             title: "NTP CLOCK".into(),
             server_label: "192.168.1.123".into(),
-            footer: footer.map(str::to_string),
+            footer: footer.map(str::to_owned),
             zone: DisplayZone::jst(),
             transport: "UDP ソケット".into(),
-            timestamping: std::sync::Arc::new(application::timestamping::TimestampingStatus::new()),
+            timestamping: Arc::new(TimestampingStatus::new()),
         }
     }
 
@@ -412,7 +414,7 @@ mod tests {
                         skip = display_width(cell.symbol()).saturating_sub(1);
                     }
                 }
-                line.trim_end().to_string()
+                line.trim_end().to_owned()
             })
             .collect()
     }
@@ -517,7 +519,7 @@ mod tests {
             (80, 24),
             (300, 100),
         ] {
-            render_text(&model, width, height);
+            drop(render_text(&model, width, height));
         }
     }
 

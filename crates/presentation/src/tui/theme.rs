@@ -6,16 +6,16 @@
 use ratatui::style::Color;
 
 /// 見出しと大きい時計
-pub const ACCENT: Color = Color::LightCyan;
+pub(super) const ACCENT: Color = Color::LightCyan;
 /// ラベル・補足
-pub const LABEL: Color = Color::Gray;
+pub(super) const LABEL: Color = Color::Gray;
 /// 通常の値
-pub const TEXT: Color = Color::White;
+pub(super) const TEXT: Color = Color::White;
 /// 良好（同期済み・小さいずれ）
-pub const GOOD: Color = Color::LightGreen;
+pub(super) const GOOD: Color = Color::LightGreen;
 /// 注意（自走中・やや大きいずれ）
-pub const WARN: Color = Color::LightYellow;
+pub(super) const WARN: Color = Color::LightYellow;
 /// 異常（拒否・大きいずれ）
-pub const BAD: Color = Color::LightRed;
+pub(super) const BAD: Color = Color::LightRed;
 /// 最下部の一文
-pub const FOOTER: Color = Color::Yellow;
+pub(super) const FOOTER: Color = Color::Yellow;

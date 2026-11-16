@@ -1,0 +1,17 @@
+# domain クレートの clippy の設定。clippy は最も近い clippy.toml を 1 つだけ読み、上位とはマージしないので、
+# ルートの clippy.toml と同じ内容に、domain だけの禁止事項を足している（変えるときは両方そろえる）。
+
+# ---- ルートの clippy.toml と同じ ----
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true
+allow-print-in-tests = true
+doc-valid-idents = ["..", "NTPv4", "EtherType", "SipHash", "KoD"]
+allowed-duplicate-crates = ["bitflags", "getrandom", "nix", "r-efi", "syn", "thiserror", "thiserror-impl"]
+
+# ---- domain だけ ----
+# domain は時計を読まず、時刻は引数で受け取る（テストで偽の時計を使えるようにするため）
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "domain は時計を読まない。時刻は引数で受け取る" },
+    { path = "std::time::SystemTime::now", reason = "domain は時計を読まない。時刻は引数で受け取る" },
+]
