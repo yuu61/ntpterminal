@@ -19,6 +19,9 @@ cargo run -- sim-server --offset-ms -0.978 --refid GNSS   # 別の端末で ↓
 cargo run -- tui 127.0.0.1:12300                          # q / Esc / Ctrl+C で終了
 ```
 
+カレントディレクトリに `config.toml` があると、その設定も使われる（引数の指定が優先）。
+手元の設定を使わずに確かめるときは `--config /dev/null`（Windows では `--config NUL`）を付ける。
+
 自動で確かめるときは tmux の中で動かす（Windows には tmux がないので WSL で）。
 
 ```sh

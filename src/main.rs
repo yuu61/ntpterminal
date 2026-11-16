@@ -1,18 +1,26 @@
 //! 組み立て役（composition root）。各層の部品をつなぐだけで、ロジックは持たない。
+//!
+//! オプションは `Option` で受け取り、設定ファイルの値で埋めてから（`config`）、残りを既定値にする。
 #![forbid(unsafe_code)]
 
 extern crate alloc;
 
+mod config;
+
 use alloc::sync::Arc;
-use core::net::SocketAddr;
+use core::fmt;
+use core::net::{IpAddr, Ipv4Addr, SocketAddr};
+use core::str::FromStr;
 use core::sync::atomic::{AtomicBool, Ordering};
 use core::time::Duration;
+use std::fs;
 use std::io::{self, Write as _};
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::mpsc;
 use std::thread;
 
-use anyhow::{Context as _, bail};
+use anyhow::Context as _;
 use application::polling_policy;
 use application::port::ClockPort;
 use application::timestamping::TimestampingStatus;
@@ -35,6 +43,34 @@ use presentation::cli::once;
 use presentation::cli::stats::StatsReporter;
 use presentation::format::{DisplayZone, timestamping_label};
 use presentation::tui::{self, SnapshotSender, TuiConfig};
+use serde::Deserialize;
+
+use crate::config::ConfigFile;
+
+/// `--config` を省略したときに読む設定ファイル（カレントディレクトリ。なければ読まない）
+const DEFAULT_CONFIG_PATH: &str = "config.toml";
+
+// ---- 既定値（コマンドラインにも設定ファイルにもないときに使う。ヘルプの「既定:」と揃える） ----
+const DEFAULT_INTERVAL_MS: u64 = 500;
+/// ポーリング間隔の下限（ミリ秒）。これより短い指定はこの値にする
+const MIN_INTERVAL_MS: u64 = 10;
+const DEFAULT_TITLE: &str = "NTP CLOCK";
+const DEFAULT_TIMEOUT_MS: u64 = 1000;
+const DEFAULT_COUNT: u64 = 20;
+const DEFAULT_SIM_BIND: SocketAddr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 12300);
+const DEFAULT_SIM_OFFSET_MS: f64 = 0.0;
+const DEFAULT_SIM_STRATUM: u8 = 1;
+const DEFAULT_SIM_REFID: &str = "SIM";
+
+// ---- 値の範囲（コマンドラインと設定ファイルの両方で確かめる） ----
+/// DSCP（6 bit）
+const DSCP_MAX: u8 = 63;
+/// ECN（2 bit）
+const ECN_MAX: u8 = 3;
+/// 802.1Q の VLAN ID（12 bit。4095 は予約）
+const VLAN_ID_MAX: u16 = 4094;
+/// 802.1Q の優先度 PCP（3 bit）
+const PCP_MAX: u8 = 7;
 
 #[derive(Parser)]
 #[command(
@@ -43,6 +79,9 @@ use presentation::tui::{self, SnapshotSender, TuiConfig};
     about = "GNSS タイムサーバのデモ用 NTP クロック"
 )]
 struct Cli {
+    /// 設定ファイル（TOML。省略時はカレントディレクトリの config.toml があれば読む）。キーは長いオプションと同じ名前で、コマンドラインの指定が優先される（例: docs/config.example.toml）
+    #[arg(long, global = true, value_name = "PATH")]
+    config: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -61,8 +100,8 @@ enum Command {
 
 #[derive(Args)]
 struct TargetArgs {
-    /// NTP サーバ（例: 192.168.1.123 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123
-    server: String,
+    /// NTP サーバ（例: 192.168.1.123 / ntp.example.com / 127.0.0.1:12300）。ポート省略時は 123。省略時は設定ファイルの server
+    server: Option<String>,
     /// 結果を JSON で出力する
     #[arg(long)]
     json: bool,
@@ -70,17 +109,20 @@ struct TargetArgs {
 
 #[derive(Args)]
 struct ZoneArgs {
-    /// 表示用のタイムゾーン（UTC からのずれ）
-    #[arg(long, default_value = "+09:00", allow_hyphen_values = true)]
-    tz: String,
-    /// タイムゾーンの表示名
-    #[arg(long, default_value = "JST")]
-    tz_label: String,
+    /// 表示用のタイムゾーン（UTC からのずれ。既定: +09:00）
+    #[arg(long, allow_hyphen_values = true, value_parser = DisplayZone::parse_offset)]
+    tz: Option<i32>,
+    /// タイムゾーンの表示名（既定: JST）
+    #[arg(long)]
+    tz_label: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+/// 設定ファイルでの綴りは、コマンドラインの値と同じ（`raw-ip` など）。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum ModeArg {
     /// 標準の UDP ソケット（権限不要・全 OS）
+    #[default]
     Udp,
     /// IPv4 / UDP ヘッダを自作して raw ソケットで送る（Linux のみ・root か `CAP_NET_RAW` が必要）
     RawIp,
@@ -88,9 +130,11 @@ enum ModeArg {
     Link,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
 enum TimestampingArg {
     /// 使えればカーネル、使えなければユーザ空間
+    #[default]
     Auto,
     /// カーネルのタイムスタンプ（Linux のみ。使えなければエラー）
     Kernel,
@@ -98,14 +142,14 @@ enum TimestampingArg {
     User,
 }
 
-#[derive(Args)]
+#[derive(Args, Clone, Copy)]
 struct TransportArgs {
-    /// 送信方式
-    #[arg(long = "transport", value_enum, default_value_t = ModeArg::Udp)]
-    mode: ModeArg,
-    /// タイムスタンプの取り方
-    #[arg(long, value_enum, default_value_t = TimestampingArg::Auto)]
-    timestamping: TimestampingArg,
+    /// 送信方式（既定: udp）
+    #[arg(long = "transport", value_enum)]
+    mode: Option<ModeArg>,
+    /// タイムスタンプの取り方（既定: auto）
+    #[arg(long, value_enum)]
+    timestamping: Option<TimestampingArg>,
     /// 送信元ポート（省略時は OS に任せる）
     #[arg(long)]
     source_port: Option<u16>,
@@ -113,10 +157,10 @@ struct TransportArgs {
     #[arg(long)]
     ttl: Option<u8>,
     /// raw-ip / link のみ: DSCP（0〜63。例: 46 = EF）
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=63))]
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=i64::from(DSCP_MAX)))]
     dscp: Option<u8>,
     /// raw-ip / link のみ: ECN（0〜3）
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=3))]
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=i64::from(ECN_MAX)))]
     ecn: Option<u8>,
     /// raw-ip / link のみ: IP の Identification（raw-ip では 0 にするとカーネルが値を入れる）
     #[arg(long)]
@@ -134,16 +178,16 @@ struct TransportArgs {
     #[arg(long)]
     dst_mac: Option<MacAddr>,
     /// link のみ: 802.1Q の VLAN ID（0〜4094）
-    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=4094))]
+    #[arg(long, value_parser = clap::value_parser!(u16).range(0..=i64::from(VLAN_ID_MAX)))]
     vlan: Option<u16>,
     /// link のみ: 802.1Q の優先度 PCP（0〜7。--vlan なしなら VLAN ID 0 の優先度タグになる）
-    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=7))]
+    #[arg(long, value_parser = clap::value_parser!(u8).range(0..=i64::from(PCP_MAX)))]
     pcp: Option<u8>,
 }
 
 impl TransportArgs {
-    const fn mode(&self) -> TransportMode {
-        match self.mode {
+    fn mode(&self) -> TransportMode {
+        match self.mode.unwrap_or_default() {
             ModeArg::Udp => TransportMode::Udp,
             ModeArg::RawIp => TransportMode::RawIp,
             ModeArg::Link => TransportMode::Link,
@@ -184,7 +228,7 @@ impl TransportArgs {
             source_port: self.source_port.unwrap_or(0),
             headers,
             link,
-            timestamping: match self.timestamping {
+            timestamping: match self.timestamping.unwrap_or_default() {
                 TimestampingArg::Auto => TimestampingMode::Auto,
                 TimestampingArg::Kernel => TimestampingMode::Kernel,
                 TimestampingArg::User => TimestampingMode::User,
@@ -221,26 +265,63 @@ fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
     }
 }
 
+/// NTP の Reference ID（4 文字以内の ASCII）。
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RefId(String);
+
+impl RefId {
+    fn bytes(&self) -> [u8; 4] {
+        let mut bytes = [0u8; 4];
+        bytes[..self.0.len()].copy_from_slice(self.0.as_bytes());
+        bytes
+    }
+}
+
+impl FromStr for RefId {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.is_ascii() && text.len() <= 4 {
+            Ok(Self(text.to_owned()))
+        } else {
+            Err(format!(
+                "Reference ID は 4 文字以内の ASCII で指定してください: {text}"
+            ))
+        }
+    }
+}
+
+impl fmt::Display for RefId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 impl ZoneArgs {
-    fn zone(&self) -> anyhow::Result<DisplayZone> {
-        let offset = DisplayZone::parse_offset(&self.tz).map_err(anyhow::Error::msg)?;
-        Ok(DisplayZone::new(offset, self.tz_label.clone()))
+    fn zone(&self) -> DisplayZone {
+        let default = DisplayZone::jst();
+        DisplayZone::new(
+            self.tz.unwrap_or_else(|| default.offset_secs()),
+            self.tz_label
+                .clone()
+                .unwrap_or_else(|| default.label().to_owned()),
+        )
     }
 }
 
 #[derive(Args)]
 struct TuiArgs {
-    /// NTP サーバ（例: 192.168.1.123 / 127.0.0.1:12300）。ポート省略時は 123
-    server: String,
-    /// ポーリング間隔（ミリ秒）
-    #[arg(long, default_value_t = 500)]
-    interval_ms: u64,
-    /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること）
+    /// NTP サーバ（例: 192.168.1.123 / 127.0.0.1:12300）。ポート省略時は 123。省略時は設定ファイルの server
+    server: Option<String>,
+    /// ポーリング間隔（ミリ秒。既定: 500）
+    #[arg(long)]
+    interval_ms: Option<u64>,
+    /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること。設定ファイルには書けない）
     #[arg(long)]
     allow_fast_poll: bool,
-    /// 最上部の見出し
-    #[arg(long, default_value = "NTP CLOCK")]
-    title: String,
+    /// 最上部の見出し（既定: NTP CLOCK）
+    #[arg(long)]
+    title: Option<String>,
     /// 最下部に出す一文（スポンサー表記など）
     #[arg(long)]
     footer: Option<String>,
@@ -257,9 +338,9 @@ struct TuiArgs {
 struct OnceArgs {
     #[command(flatten)]
     target: TargetArgs,
-    /// 応答を待つ上限（ミリ秒）
-    #[arg(long, default_value_t = 1000)]
-    timeout_ms: u64,
+    /// 応答を待つ上限（ミリ秒。既定: 1000）
+    #[arg(long)]
+    timeout_ms: Option<u64>,
     #[command(flatten)]
     zone: ZoneArgs,
     #[command(flatten)]
@@ -270,13 +351,13 @@ struct OnceArgs {
 struct StatsArgs {
     #[command(flatten)]
     target: TargetArgs,
-    /// ポーリング間隔（ミリ秒）
-    #[arg(long, default_value_t = 500)]
-    interval_ms: u64,
-    /// 試行回数（0 = 無制限。Ctrl+C で終了）
-    #[arg(long, default_value_t = 20)]
-    count: u64,
-    /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること）
+    /// ポーリング間隔（ミリ秒。既定: 500）
+    #[arg(long)]
+    interval_ms: Option<u64>,
+    /// 試行回数（0 = 無制限。Ctrl+C で終了。既定: 20）
+    #[arg(long)]
+    count: Option<u64>,
+    /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること。設定ファイルには書けない）
     #[arg(long)]
     allow_fast_poll: bool,
     #[command(flatten)]
@@ -285,18 +366,18 @@ struct StatsArgs {
 
 #[derive(Args)]
 struct SimServerArgs {
-    /// 待ち受けるアドレス
-    #[arg(long, default_value = "127.0.0.1:12300")]
-    bind: SocketAddr,
-    /// PC の時計に対するサーバ時刻のずれ（ミリ秒。負も可）
-    #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
-    offset_ms: f64,
-    /// 応答に入れる stratum
-    #[arg(long, default_value_t = 1)]
-    stratum: u8,
-    /// 応答に入れる Reference ID（4 文字以内の ASCII）
-    #[arg(long, default_value = "SIM")]
-    refid: String,
+    /// 待ち受けるアドレス（既定: 127.0.0.1:12300）
+    #[arg(long)]
+    bind: Option<SocketAddr>,
+    /// PC の時計に対するサーバ時刻のずれ（ミリ秒。負も可。既定: 0）
+    #[arg(long, allow_hyphen_values = true)]
+    offset_ms: Option<f64>,
+    /// 応答に入れる stratum（既定: 1）
+    #[arg(long)]
+    stratum: Option<u8>,
+    /// 応答に入れる Reference ID（4 文字以内の ASCII。既定: SIM）
+    #[arg(long)]
+    refid: Option<RefId>,
 }
 
 fn main() -> ExitCode {
@@ -311,7 +392,11 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> anyhow::Result<ExitCode> {
-    match cli.command {
+    let file = match cli.config.as_deref() {
+        Some(path) => load_config(path)?,
+        None => load_config_if_exists(Path::new(DEFAULT_CONFIG_PATH))?,
+    };
+    match file.fill(cli.command) {
         Command::Tui(args) => run_tui(&args),
         Command::Once(args) => run_once(&args),
         Command::Stats(args) => run_stats(&args),
@@ -319,10 +404,27 @@ fn run(cli: Cli) -> anyhow::Result<ExitCode> {
     }
 }
 
+fn load_config(path: &Path) -> anyhow::Result<ConfigFile> {
+    let text = fs::read_to_string(path)
+        .with_context(|| format!("設定ファイルを読めません: {}", path.display()))?;
+    config::parse(&text)
+        .with_context(|| format!("設定ファイルの内容が正しくありません: {}", path.display()))
+}
+
+/// ファイルがなければ、設定ファイルなし（コマンドラインと既定値だけ）として扱う。
+/// あるのに読めないとき・内容が正しくないときはエラーにする。
+fn load_config_if_exists(path: &Path) -> anyhow::Result<ConfigFile> {
+    if fs::metadata(path).is_err_and(|error| error.kind() == io::ErrorKind::NotFound) {
+        return Ok(ConfigFile::default());
+    }
+    load_config(path)
+}
+
 fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
-    let zone = args.zone.zone()?;
-    let server = resolve(&args.server)?;
-    let interval = Duration::from_millis(args.interval_ms.max(10));
+    let zone = args.zone.zone();
+    let server_text = required_server(args.server.as_deref())?;
+    let server = resolve(server_text)?;
+    let interval = polling_interval(args.interval_ms);
     if !args.allow_fast_poll {
         polling_policy::check_interval(server.ip(), interval)?;
     }
@@ -356,8 +458,11 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         .context("同期スレッドを起動できません")?;
 
     let config = TuiConfig {
-        title: args.title.clone(),
-        server_label: args.server.trim().to_owned(),
+        title: args
+            .title
+            .clone()
+            .unwrap_or_else(|| DEFAULT_TITLE.to_owned()),
+        server_label: server_text.trim().to_owned(),
         footer: args.footer.clone(),
         trend: args.trend,
         zone,
@@ -373,8 +478,8 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
 }
 
 fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
-    let zone = args.zone.zone()?;
-    let server = resolve(&args.target.server)?;
+    let zone = args.zone.zone();
+    let server = resolve(required_server(args.target.server.as_deref())?)?;
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let timestamping = Arc::new(TimestampingStatus::new());
     let OpenedTransport {
@@ -389,7 +494,7 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
         RandomNonce::new(),
         clock,
         RequestTemplate::default(),
-        Duration::from_millis(args.timeout_ms),
+        Duration::from_millis(args.timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS)),
     );
     match result {
         Ok(outcome) if args.target.json => {
@@ -435,8 +540,9 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
 }
 
 fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
-    let server = resolve(&args.target.server)?;
-    let interval = Duration::from_millis(args.interval_ms.max(10));
+    let server = resolve(required_server(args.target.server.as_deref())?)?;
+    let interval = polling_interval(args.interval_ms);
+    let count = args.count.unwrap_or(DEFAULT_COUNT);
     if !args.allow_fast_poll {
         polling_policy::check_interval(server.ip(), interval)?;
     }
@@ -458,44 +564,52 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
 
     let mut reporter = StatsReporter::new(io::stdout().lock(), server, args.target.json)
         .with_timestamping(Arc::clone(&timestamping));
-    if args.count == 0 {
+    if count == 0 {
         reporter = reporter.with_periodic_summary(20);
     }
     reporter.write_header(interval, &transport_label);
-    service.run(&mut reporter, (args.count > 0).then_some(args.count));
+    service.run(&mut reporter, (count > 0).then_some(count));
     reporter.write_summary();
     Ok(ExitCode::SUCCESS)
 }
 
 fn run_sim_server(args: &SimServerArgs) -> anyhow::Result<ExitCode> {
+    let bind = args.bind.unwrap_or(DEFAULT_SIM_BIND);
+    let offset_ms = args.offset_ms.unwrap_or(DEFAULT_SIM_OFFSET_MS);
+    let stratum = args.stratum.unwrap_or(DEFAULT_SIM_STRATUM);
+    let refid = args
+        .refid
+        .clone()
+        .unwrap_or_else(|| RefId(DEFAULT_SIM_REFID.to_owned()));
     let config = SimServerConfig {
-        offset: TimeDelta::from_millis_f64(args.offset_ms),
-        stratum: args.stratum,
-        reference_id: refid_bytes(&args.refid)?,
+        offset: TimeDelta::from_millis_f64(offset_ms),
+        stratum,
+        reference_id: refid.bytes(),
     };
-    let server = SimServer::spawn(args.bind, config)
-        .with_context(|| format!("{} で待ち受けできません", args.bind))?;
+    let server =
+        SimServer::spawn(bind, config).with_context(|| format!("{bind} で待ち受けできません"))?;
     writeln!(
         io::stderr().lock(),
-        "疑似 NTP サーバを {} で起動しました（offset {:+.3} ms, stratum {}, refid {}）。Ctrl+C で終了します。",
+        "疑似 NTP サーバを {} で起動しました（offset {offset_ms:+.3} ms, stratum {stratum}, refid {refid}）。Ctrl+C で終了します。",
         server.local_addr(),
-        args.offset_ms,
-        args.stratum,
-        args.refid
     )?;
     server.join();
     Ok(ExitCode::SUCCESS)
 }
 
-fn resolve(server: &str) -> anyhow::Result<SocketAddr> {
-    resolve_server(server).with_context(|| format!("サーバのアドレスを解決できません: {server}"))
+/// 引数か設定ファイルで指定したサーバ。
+fn required_server(server: Option<&str>) -> anyhow::Result<&str> {
+    server.context("NTP サーバを指定してください（引数か、設定ファイルの server）")
 }
 
-fn refid_bytes(text: &str) -> anyhow::Result<[u8; 4]> {
-    if !text.is_ascii() || text.len() > 4 {
-        bail!("Reference ID は 4 文字以内の ASCII で指定してください: {text}");
-    }
-    let mut bytes = [0u8; 4];
-    bytes[..text.len()].copy_from_slice(text.as_bytes());
-    Ok(bytes)
+fn polling_interval(interval_ms: Option<u64>) -> Duration {
+    Duration::from_millis(
+        interval_ms
+            .unwrap_or(DEFAULT_INTERVAL_MS)
+            .max(MIN_INTERVAL_MS),
+    )
+}
+
+fn resolve(server: &str) -> anyhow::Result<SocketAddr> {
+    resolve_server(server).with_context(|| format!("サーバのアドレスを解決できません: {server}"))
 }

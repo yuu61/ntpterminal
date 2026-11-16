@@ -22,6 +22,10 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 実機のサーバがなくても `cargo run -- sim-server` と `cargo run -- tui 127.0.0.1:12300` で動かせる。
 手順の詳細は `docs/testing.md`。
 
+オプションは TOML の設定ファイルにも書ける（`--config <PATH>`、省略時はカレントディレクトリの `config.toml`。
+キーは長いオプションと同じ名前。決まりは `src/config.rs` の先頭）。スクリプトからは `--config /dev/null` で手元の設定を読ませない。
+オプションを足したら `src/config.rs` と全項目の例 `docs/config.example.toml` にも足す（足し忘れはテストで落ちる）。
+
 ## 守ること
 
 - 層は `domain`（I/O なし）← `application`（ユースケース・ポート）← `infrastructure` / `presentation`。
