@@ -42,11 +42,12 @@ clippy.toml はルートと `crates/domain/` の 2 つ（マージされない�
 - テストは実時間を待たない（偽の `ClockPort` と模擬 `PacketPort`）。送受信の機能は、成功したことだけでなく
   カウンタや実際に送られたパケットで中身を確かめる。
 - 依存は使うときにルートの `[workspace.dependencies]` へ追加する。エラーはライブラリが `thiserror`、`main.rs` だけ `anyhow`。
-- コメントと UI の文言は日本語で書く。
+- コメントと CLI（`once`・`stats`・エラー）の文言は日本語、TUI の文言は英語（ASCII の文字だけ）で書く（`tui/text.rs` の先頭）。
+  TUI に出るものは、下の層では文言にせず種類（列挙型・`application::description`）で渡し、presentation で言葉にする。
 - 公開 NTP サーバに短い間隔で問い合わせない（手動の確認でも）。
 
 各部分の決まりごととその理由は、モジュール先頭のドキュメントコメントに書いてある
-（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`transport/hardware_ts.rs`、`tui/big_digits.rs`、
+（例: `transport/raw_ip.rs`、`transport/link.rs`、`transport/kernel_ts.rs`、`transport/hardware_ts.rs`、`tui/big_digits.rs`、`tui/text.rs`、
 GNSS 受信機を SNMP で読む部分は `acl/mib.rs` と `usecase/receiver_monitor.rs`、
 ptp4l が合わせる PHC は `ptp_clock/source.rs`・`usecase/ptp4l_client.rs`・`usecase/phc_selection.rs`・`phc.rs`・`ptp4l.rs`、
 PTP のスレーブ（`--ptp`）は `ptp_clock/master.rs`・`usecase/ptp_slave.rs`・`transport/ptp_udp.rs`・`sim_ptp_master.rs`）。

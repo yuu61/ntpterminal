@@ -4,9 +4,11 @@
 //! - PTP の時間差はナノ秒で出す。`µ`（マイクロ）は East Asian Ambiguous（端末の設定で幅が 1 にも 2 にもなる）
 //!   なので使わず、0.1 ms 以上はミリ秒で出す
 //! - PHC の状態の文言には ptp4l のポートの状態（`SLAVE` など）を添え、ptp4l の表示と見比べられるようにする
+//! - 文言は CLI のもの。TUI の文言（英語）は `tui::text` にある（ナノ秒の整形はここのものを使う）
 
 use core::net::SocketAddr;
 
+use application::description::{PhcInfo, PhcReadMethod, PtpTransportInfo};
 use application::snapshot::MasterSnapshot;
 use domain::ptp_clock::{
     ClockRole, LeapWarning, MasterState, MasterStatus, PhcState, PtpStatus, TimeProperties,
@@ -35,6 +37,44 @@ pub fn format_nanos(delta: TimeDelta) -> String {
     } else {
         format!("{:.3} ms", delta.as_millis_f64())
     }
+}
+
+/// PTP の送受信の説明: `nic0 192.168.10.200・UDP 319/320・マルチキャスト`・
+/// `192.168.10.200・UDP 319/320・Delay_Req は 192.168.10.50:319 へ`
+#[must_use]
+pub fn ptp_transport_label(info: &PtpTransportInfo) -> String {
+    let local = info.local;
+    let name = info
+        .interface
+        .as_ref()
+        .map_or_else(|| local.to_string(), |name| format!("{name} {local}"));
+    let mode = info.unicast_to.map_or_else(
+        || "マルチキャスト".to_owned(),
+        |to| format!("Delay_Req は {to} へ"),
+    );
+    format!(
+        "{name}・UDP {}/{}・{mode}",
+        info.event_port,
+        info.general_port()
+    )
+}
+
+/// PHC の説明: "/dev/ptp0（同時読み取り）"・"/dev/ptp1（仮想 PHC・前後の読みで挟む）"
+#[must_use]
+pub fn phc_label(info: &PhcInfo) -> String {
+    let mut notes = Vec::new();
+    if info.virtual_clock {
+        notes.push("仮想 PHC");
+    }
+    if info.from_interface {
+        notes.push("インターフェースから特定");
+    }
+    notes.push(match info.method {
+        PhcReadMethod::Precise => "同時読み取り",
+        PhcReadMethod::Extended => "前後の読みで挟む",
+        PhcReadMethod::Basic => "前後の読みで挟む・粗い",
+    });
+    format!("{}（{}）", info.path, notes.join("・"))
 }
 
 /// 状態の文言: "同期済み（SLAVE）"・"自走中（ptp4l の応答なし）" など。
@@ -234,9 +274,14 @@ pub fn master_label(status: &MasterStatus, address: Option<SocketAddr>) -> Strin
 /// 間隔: "1 秒" / "0.125 秒" / "2 秒"
 #[must_use]
 pub fn format_interval(delta: TimeDelta) -> String {
+    format!("{} 秒", format_seconds(delta))
+}
+
+/// 秒の数だけ（ミリ秒まで。末尾の 0 は省く）: "1" / "0.125"
+#[must_use]
+pub fn format_seconds(delta: TimeDelta) -> String {
     let text = format!("{:.3}", delta.as_secs_f64());
-    let trimmed = text.trim_end_matches('0').trim_end_matches('.');
-    format!("{trimmed} 秒")
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// Sync と `Delay_Req` の間隔: "Sync 1 秒（two-step）・Delay_Req 1 秒"。
@@ -267,6 +312,7 @@ pub fn intervals_label(snapshot: &MasterSnapshot) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::net::Ipv4Addr;
     use domain::ptp_clock::{ClockIdentity, ClockQuality, PortState, PortStatus};
 
     fn status(states: &[PortState]) -> PtpStatus {
@@ -336,6 +382,41 @@ mod tests {
         assert_eq!(
             port_label(&slave, &[(1, "eth0".to_owned()), (2, "eth1".to_owned())]),
             "eth0 MASTER、eth1 SLAVE"
+        );
+    }
+
+    #[test]
+    fn transports_and_phcs_are_described() {
+        let local = Ipv4Addr::new(192, 168, 10, 200);
+        let mut transport = PtpTransportInfo {
+            interface: Some("nic0".to_owned()),
+            local,
+            event_port: 319,
+            unicast_to: None,
+        };
+        assert_eq!(
+            ptp_transport_label(&transport),
+            "nic0 192.168.10.200・UDP 319/320・マルチキャスト"
+        );
+        transport.interface = None;
+        transport.unicast_to = Some(SocketAddr::from(([192, 168, 10, 50], 319)));
+        assert_eq!(
+            ptp_transport_label(&transport),
+            "192.168.10.200・UDP 319/320・Delay_Req は 192.168.10.50:319 へ"
+        );
+        let mut phc = PhcInfo {
+            path: "/dev/ptp0".to_owned(),
+            virtual_clock: false,
+            from_interface: false,
+            method: PhcReadMethod::Precise,
+        };
+        assert_eq!(phc_label(&phc), "/dev/ptp0（同時読み取り）");
+        phc.virtual_clock = true;
+        phc.from_interface = true;
+        phc.method = PhcReadMethod::Basic;
+        assert_eq!(
+            phc_label(&phc),
+            "/dev/ptp0（仮想 PHC・インターフェースから特定・前後の読みで挟む・粗い）"
         );
     }
 

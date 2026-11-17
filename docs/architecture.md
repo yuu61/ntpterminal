@@ -20,7 +20,7 @@ domain  ←  application  ←  infrastructure
 | domain         | `crates/domain`         | I/O を持たない純粋なモデル。時計は読まず、時刻はすべて引数で受け取る |
 | application    | `crates/application`    | ユースケースと、外側のレイヤーが実装するポート（trait）。コンテキスト間の変換を行う ACL もここにある |
 | infrastructure | `crates/infrastructure` | ポートの実装（ソケット、時計、疑似サーバ）。OS 固有のコードと `unsafe` はこのクレートにしか置かない |
-| presentation   | `crates/presentation`   | CLI（`once`、`stats`）と TUI                                          |
+| presentation   | `crates/presentation`   | CLI（`once`、`stats`。文言は日本語）と TUI（文言は英語）。TUI の文言はこの層だけで作る（下の層のエラーの `Display` は CLI 用の日本語） |
 | 組み立て       | `src/main.rs`           | オプションと設定ファイル（`src/config.rs`）を読み込み、各部品をつなぐ。ロジックは持たない |
 
 domain と application は I/O を持たないため、時刻同期の振る舞いは偽の時計と模擬ネットワークを使って、
@@ -137,6 +137,8 @@ ptp4l が合わせる PHC の表示に使う口は transport の外にある（�
 | [`ptp4l.rs`](../crates/infrastructure/src/ptp4l.rs)            | ptp4l の管理用ソケット（Unix ドメインソケット）への送受信と、PHC を開く入口 |
 どの実装を使うか、またどのオプションの組み合わせをエラーとするかは [`transport.rs`](../crates/infrastructure/src/transport.rs) で決めている。
 タイムスタンプを実際にどこから取得できたかは `application::timestamping` のカウンタに記録し、画面に表示する。
+開いた送受信の口と PHC（送信方式・インターフェース・宛先 MAC・ハードウェアのタイムスタンプの NIC・PHC の読み方）は、
+文言ではなく `application::description` の値で返し、CLI（日本語）と TUI（英語）がそれぞれの言葉にする。
 
 ## テスト
 
@@ -173,4 +175,5 @@ ptp4l が合わせる PHC の表示に使う口は transport の外にある（�
 | 対応している MIB と、衛星数の意味の違い              | [`acl/mib.rs`](../crates/application/src/acl/mib.rs)                        |
 | 大きな数字の描画方法（ブロック文字を避ける理由）     | [`tui/big_digits.rs`](../crates/presentation/src/tui/big_digits.rs)         |
 | 推移のグラフ、受信機の行、配色                       | [`tui/trend.rs`](../crates/presentation/src/tui/trend.rs)、[`tui/receiver.rs`](../crates/presentation/src/tui/receiver.rs)、[`tui/theme.rs`](../crates/presentation/src/tui/theme.rs) |
+| TUI の文言（英語・ASCII だけにする理由）             | [`tui/text.rs`](../crates/presentation/src/tui/text.rs)                     |
 | lint を無効にしてよい基準                            | [`Cargo.toml`](../Cargo.toml) の `[workspace.lints]`                        |

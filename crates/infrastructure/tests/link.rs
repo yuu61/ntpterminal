@@ -20,6 +20,7 @@ use core::time::Duration;
 use std::io::{self, Read as _};
 use std::time::Instant;
 
+use application::description::NtpTransportKind;
 use application::port::{ClockPort, PacketPort as _};
 use application::timestamping::TimestampingStatus;
 use application::usecase::{OnceOutcome, query_once};
@@ -125,7 +126,14 @@ fn query_over_link_sends_ip_header_exactly_as_specified() {
         Arc::new(TimestampingStatus::new()),
     )
     .unwrap();
-    assert!(opened.description.contains("lo"), "{}", opened.description);
+    assert!(
+        matches!(
+            &opened.info.kind,
+            NtpTransportKind::Link { interface, .. } if interface == "lo"
+        ),
+        "{:?}",
+        opened.info
+    );
 
     let outcome = query_once(
         opened.port,

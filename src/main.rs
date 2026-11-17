@@ -22,6 +22,7 @@ use std::thread;
 
 use anyhow::Context as _;
 use application::acl::mib::MibProfile;
+use application::description::PhcInfo;
 use application::polling_policy;
 use application::port::{ClockPort, NonceSource as _, PacketPort, PhcPort};
 use application::snapshot::ReceiverSnapshot;
@@ -53,7 +54,7 @@ use presentation::cli::master::{self, MasterStatsReporter, MasterTarget};
 use presentation::cli::once;
 use presentation::cli::phc::{self, PhcStatsReporter, PhcTarget};
 use presentation::cli::stats::StatsReporter;
-use presentation::format::{DisplayZone, timestamping_label};
+use presentation::format::{DisplayZone, timestamping_label, transport_label};
 use presentation::tui::{
     self, MasterSnapshotSender, PhcSnapshotSender, SnapshotSender, SourceSnapshot, TuiConfig,
     TuiSource,
@@ -844,7 +845,7 @@ fn start_ntp(
     let timestamping = Arc::new(TimestampingStatus::new());
     let OpenedTransport {
         port: transport,
-        description: transport_label,
+        info: transport_info,
     } = args
         .transport
         .open(server, Arc::clone(clock), Arc::clone(&timestamping))?;
@@ -874,7 +875,7 @@ fn start_ntp(
     Ok(StartedSource {
         source: TuiSource::Ntp {
             receiver: receiver_monitor.is_some(),
-            transport: transport_label,
+            transport: transport_info,
             timestamping,
         },
         label: server_text.trim().to_owned(),
@@ -906,7 +907,7 @@ fn start_phc(
         })
         .context("同期スレッドを起動できません")?;
     Ok(StartedSource {
-        label: target.ptp4l_label(),
+        label: tui::phc_server_label(&target),
         source: TuiSource::Phc {
             phc: target.phc,
             ports: target.ports,
@@ -935,7 +936,7 @@ fn start_ptp(
         })
         .context("同期スレッドを起動できません")?;
     Ok(StartedSource {
-        label: target.label(),
+        label: tui::master_server_label(&target),
         source: TuiSource::Ptp {
             transport: target.transport,
             timestamping,
@@ -986,7 +987,7 @@ fn open_master(
     );
     let target = MasterTarget {
         domain,
-        transport: opened.description,
+        transport: opened.info,
     };
     Ok((service, target, timestamping))
 }
@@ -1028,18 +1029,15 @@ fn open_ptp4l(
         anyhow::Error::new(error).context(context)
     })?;
     let opened = ptp4l::open_phc(selected.index, Arc::clone(clock)).context("PHC を開けません")?;
-    let mut notes = Vec::new();
-    if selected.vclock {
-        notes.push("仮想 PHC");
-    }
-    if selected.from_interface {
-        notes.push("インターフェースから特定");
-    }
-    notes.push(opened.method);
     let target = PhcTarget {
         socket: connection.path.display().to_string(),
         domain,
-        phc: format!("{}（{}）", opened.path, notes.join("・")),
+        phc: PhcInfo {
+            path: opened.path,
+            virtual_clock: selected.vclock,
+            from_interface: selected.from_interface,
+            method: opened.method,
+        },
         ports: selected
             .ports
             .iter()
@@ -1097,10 +1095,11 @@ fn run_once(args: &OnceArgs) -> anyhow::Result<ExitCode> {
     let timestamping = Arc::new(TimestampingStatus::new());
     let OpenedTransport {
         port: transport,
-        description: transport_label,
+        info: transport_info,
     } = args
         .transport
         .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
+    let transport_label = transport_label(&transport_info);
 
     let result = query_once(
         transport,
@@ -1192,7 +1191,7 @@ fn run_once_phc(args: &OnceArgs) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::FAILURE)
         }
         Err(error) => {
-            writeln!(io::stderr().lock(), "{}: {error}", target.phc)?;
+            writeln!(io::stderr().lock(), "{}: {error}", target.phc_label())?;
             Ok(ExitCode::FAILURE)
         }
     }
@@ -1265,10 +1264,11 @@ fn run_stats(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     let timestamping = Arc::new(TimestampingStatus::new());
     let OpenedTransport {
         port: transport,
-        description: transport_label,
+        info: transport_info,
     } = args
         .transport
         .open(server, Arc::clone(&clock), Arc::clone(&timestamping))?;
+    let transport_label = transport_label(&transport_info);
     let mut service = SyncService::new(
         SourceConfig::with_poll_interval(TimeDelta::from_std(interval)),
         transport,

@@ -1,26 +1,30 @@
 //! 受信機の情報欄（`tui --snmp-community` のときだけ出す 2 行）。
 //!
-//! - 1 行目「GNSS 受信機」: MIB・受信機の名前・状態（アンテナ・ホールドオーバー）。直近の問い合わせが失敗したら、
+//! - 1 行目 "GNSS receiver": MIB・受信機の名前・状態（アンテナ・ホールドオーバー）。直近の問い合わせが失敗したら、
 //!   そのことと、最後に取れてからの経過時間を出す
-//! - 2 行目「衛星」: 衛星の数を意味ごとに（良好・可視・見えるはず・追尾）。メーカーが数えていない意味の数は出さない。
-//!   直近の問い合わせが失敗したら、代わりに「SNMP エラー」としてエラーの内容を出す（古い数を今の値のように出さない）
+//! - 2 行目 "Satellites": 衛星の数を意味ごとに（良好・可視・見えるはず・追尾）。メーカーが数えていない意味の数は
+//!   出さない。直近の問い合わせが失敗したら、代わりに "SNMP error" としてエラーの内容を出す（古い数を今の値のように
+//!   出さない）
 //! - 行を 2 つに抑えるのは、80×24 の端末でも大きい時計を縮めないため
+//! - エラーの文言は、エラーの種類ごとにここで英語にする（[`MonitorError`] の `Display` は CLI 用の日本語）
 
 use ratatui::style::Color;
 
-use application::acl::mib::MibProfile;
+use application::acl::mib::{MibError, MibProfile};
+use application::port::TransportError;
 use application::snapshot::ReceiverSnapshot;
+use application::usecase::MonitorError;
 use domain::receiver::{
     AntennaState, Constellation, ConstellationCount, ReceiverState, ReceiverStatus, SatelliteCounts,
 };
-use domain::shared_kernel::{PcTime, TimeDelta};
+use domain::shared_kernel::PcTime;
 
 use super::screen::InfoRow;
-use super::theme;
+use super::{text, theme};
 
-const LABEL_RECEIVER: &str = "GNSS 受信機";
-const LABEL_SATELLITES: &str = "衛星";
-const LABEL_ERROR: &str = "SNMP エラー";
+const LABEL_RECEIVER: &str = "GNSS receiver";
+const LABEL_SATELLITES: &str = "Satellites";
+const LABEL_ERROR: &str = "SNMP error";
 
 /// 受信機の 2 行。`snapshot` がなければ（最初の応答の前）問い合わせ中と出す。
 pub(super) fn rows(snapshot: Option<&ReceiverSnapshot>, now: PcTime) -> [InfoRow; 2] {
@@ -32,23 +36,18 @@ pub(super) fn rows(snapshot: Option<&ReceiverSnapshot>, now: PcTime) -> [InfoRow
             .last_success
             .and_then(|at| now.since(at).ok())
             .map_or_else(
-                || "未取得".to_owned(),
-                |elapsed| {
-                    format!(
-                        "最終取得 {:.1} 秒前",
-                        elapsed.max(TimeDelta::ZERO).as_secs_f64()
-                    )
-                },
+                || "never succeeded".to_owned(),
+                |elapsed| format!("last success {}", text::ago(elapsed)),
             );
         return [
             InfoRow {
                 label: LABEL_RECEIVER,
-                value: with_source(snap.profile, None, &format!("取得失敗（{since}）")),
+                value: with_source(snap.profile, None, &format!("Query failed ({since})")),
                 color: theme::BAD,
             },
             InfoRow {
                 label: LABEL_ERROR,
-                value: error.to_string(),
+                value: monitor_error(error),
                 color: theme::BAD,
             },
         ];
@@ -74,7 +73,7 @@ fn waiting() -> [InfoRow; 2] {
     [
         InfoRow {
             label: LABEL_RECEIVER,
-            value: "問い合わせ中".to_owned(),
+            value: "Querying".to_owned(),
             color: theme::LABEL,
         },
         InfoRow {
@@ -85,15 +84,41 @@ fn waiting() -> [InfoRow; 2] {
     ]
 }
 
-/// "Meinberg LTNG（gps180）: 同期（gpsSync）" のように、どこから読んだかを前に付ける。
-fn with_source(profile: Option<MibProfile>, name: Option<&str>, text: &str) -> String {
+/// "Meinberg LTNG (gps180): Synchronized (gpsSync)" のように、どこから読んだかを前に付ける。
+fn with_source(profile: Option<MibProfile>, name: Option<&str>, state: &str) -> String {
     let source = match (profile.map(mib_label), name) {
-        (Some(mib), Some(receiver)) => format!("{mib}（{receiver}）: "),
+        (Some(mib), Some(receiver)) => format!("{mib} ({receiver}): "),
         (Some(mib), None) => format!("{mib}: "),
         (None, Some(receiver)) => format!("{receiver}: "),
         (None, None) => String::new(),
     };
-    format!("{source}{text}")
+    format!("{source}{state}")
+}
+
+/// 受信機の監視のエラー。OS が返す説明（送受信のエラー）だけは、そのまま添える。
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "送受信のエラーの説明（String）を借りるには、参照のまま照合するしかない（ref は ref_patterns で禁止）"
+)]
+fn monitor_error(error: &MonitorError) -> String {
+    match error {
+        MonitorError::Transport(TransportError::Unreachable(detail)) => {
+            format!("Unreachable: {detail}")
+        }
+        MonitorError::Transport(TransportError::Io(detail)) => format!("I/O error: {detail}"),
+        MonitorError::Timeout => {
+            "No SNMP response (check community, port and SNMP settings of the device)".to_owned()
+        }
+        MonitorError::ErrorStatus { status, index } => {
+            format!("SNMP error response (error-status {status}, error-index {index})")
+        }
+        MonitorError::UnknownMib => "No supported MIB found (Meinberg, Microchip S650)".to_owned(),
+        MonitorError::Mib(MibError::NoValues(profile)) => format!(
+            "{} returned no values (device does not support this MIB)",
+            mib_label(*profile)
+        ),
+        MonitorError::Stopped => "Stopped".to_owned(),
+    }
 }
 
 /// 画面に出す MIB の短い名前。
@@ -107,35 +132,35 @@ pub const fn mib_label(profile: MibProfile) -> &'static str {
     }
 }
 
-/// "同期（gpsSync）・アンテナ正常・ホールドオーバー中"
+/// "Synchronized (gpsSync), antenna OK, holdover"
 fn state_text(status: &ReceiverStatus) -> String {
     let state = match status.state {
-        Some(ReceiverState::Synchronized) => "同期",
-        Some(ReceiverState::Acquiring) => "捕捉中",
-        Some(ReceiverState::NotSynchronized) => "未同期",
-        None => "状態不明",
+        Some(ReceiverState::Synchronized) => "Synchronized",
+        Some(ReceiverState::Acquiring) => "Acquiring",
+        Some(ReceiverState::NotSynchronized) => "Not synchronized",
+        None => "Unknown state",
     };
     let mut parts = vec![
         status
             .state_detail
             .as_deref()
-            .map_or_else(|| state.to_owned(), |detail| format!("{state}（{detail}）")),
+            .map_or_else(|| state.to_owned(), |detail| format!("{state} ({detail})")),
     ];
     if let Some(antenna) = status.antenna {
         parts.push(
             match antenna {
-                AntennaState::Connected => "アンテナ正常",
-                AntennaState::Disconnected => "アンテナ断線",
-                AntennaState::ShortCircuit => "アンテナ短絡",
-                AntennaState::Faulty => "アンテナ異常",
+                AntennaState::Connected => "antenna OK",
+                AntennaState::Disconnected => "antenna disconnected",
+                AntennaState::ShortCircuit => "antenna short circuit",
+                AntennaState::Faulty => "antenna fault",
             }
             .to_owned(),
         );
     }
     if status.holdover == Some(true) {
-        parts.push("ホールドオーバー中".to_owned());
+        parts.push("holdover".to_owned());
     }
-    parts.join("・")
+    parts.join(", ")
 }
 
 /// 同期していない・アンテナの異常は異常、捕捉中・ホールドオーバーは注意。
@@ -154,19 +179,19 @@ fn state_color(status: &ReceiverStatus) -> Color {
     }
 }
 
-/// "良好 5 / 可視 9"、"追尾 3（GPS 2・Galileo 1）"。どの数も取れなければ "取得不可"。
+/// "good 5 / in view 9"、"tracking 3 (GPS 2, Galileo 1)"。どの数も取れなければ "Unavailable"。
 fn satellites_text(counts: &SatelliteCounts, constellations: &[ConstellationCount]) -> String {
     let parts: Vec<String> = [
-        ("良好", counts.good),
-        ("可視", counts.in_view),
-        ("見えるはず", counts.expected),
-        ("追尾", counts.tracking),
+        ("good", counts.good),
+        ("in view", counts.in_view),
+        ("expected", counts.expected),
+        ("tracking", counts.tracking),
     ]
     .into_iter()
     .filter_map(|(label, count)| count.map(|number| format!("{label} {number}")))
     .collect();
     if parts.is_empty() {
-        return "取得不可".to_owned();
+        return "Unavailable".to_owned();
     }
     let mut text = parts.join(" / ");
     if !constellations.is_empty() {
@@ -180,7 +205,7 @@ fn satellites_text(counts: &SatelliteCounts, constellations: &[ConstellationCoun
                 )
             })
             .collect();
-        text = format!("{text}（{}）", breakdown.join("・"));
+        text = format!("{text} ({})", breakdown.join(", "));
     }
     text
 }
@@ -204,8 +229,6 @@ fn constellation_label(constellation: &Constellation) -> &str {
 
 #[cfg(test)]
 mod tests {
-    use application::usecase::MonitorError;
-
     use super::*;
 
     fn snapshot(status: ReceiverStatus) -> ReceiverSnapshot {
@@ -249,10 +272,10 @@ mod tests {
             values(&rows),
             [
                 (
-                    "GNSS 受信機",
-                    "Meinberg LTNG（gps180）: 同期（gpsSync）・アンテナ正常"
+                    "GNSS receiver",
+                    "Meinberg LTNG (gps180): Synchronized (gpsSync), antenna OK"
                 ),
-                ("衛星", "良好 5 / 可視 9"),
+                ("Satellites", "good 5 / in view 9"),
             ]
         );
         assert_eq!(rows[0].color, theme::GOOD);
@@ -288,10 +311,10 @@ mod tests {
             values(&rows),
             [
                 (
-                    "GNSS 受信機",
-                    "Microchip S650（SyncServer S650）: 同期（Tracking）・ホールドオーバー中"
+                    "GNSS receiver",
+                    "Microchip S650 (SyncServer S650): Synchronized (Tracking), holdover"
                 ),
-                ("衛星", "追尾 3（GPS 2・Galileo 1）"),
+                ("Satellites", "tracking 3 (GPS 2, Galileo 1)"),
             ]
         );
         assert_eq!(rows[0].color, theme::WARN);
@@ -308,8 +331,11 @@ mod tests {
         assert_eq!(
             values(&rows),
             [
-                ("GNSS 受信機", "Meinberg LTNG: 未同期・アンテナ断線"),
-                ("衛星", "取得不可"),
+                (
+                    "GNSS receiver",
+                    "Meinberg LTNG: Not synchronized, antenna disconnected"
+                ),
+                ("Satellites", "Unavailable"),
             ]
         );
         assert_eq!(rows[0].color, theme::BAD);
@@ -323,16 +349,19 @@ mod tests {
         let rows = rows(Some(&snap), PcTime::monotonic(13_500_000_000));
         assert_eq!(
             rows[0].value,
-            "Meinberg LTNG: 取得失敗（最終取得 12.5 秒前）"
+            "Meinberg LTNG: Query failed (last success 12.5 s ago)"
         );
-        assert_eq!(rows[1].label, "SNMP エラー");
-        assert_eq!(rows[1].value, MonitorError::Timeout.to_string());
-        assert!(!rows.iter().any(|row| row.value.contains("良好")));
+        assert_eq!(rows[1].label, "SNMP error");
+        assert_eq!(
+            rows[1].value,
+            "No SNMP response (check community, port and SNMP settings of the device)"
+        );
+        assert!(!rows.iter().any(|row| row.value.contains("good")));
 
         snap.last_success = None;
         snap.profile = None;
         let never = super::rows(Some(&snap), PcTime::monotonic(0));
-        assert_eq!(never[0].value, "取得失敗（未取得）");
+        assert_eq!(never[0].value, "Query failed (never succeeded)");
     }
 
     #[test]
@@ -340,7 +369,7 @@ mod tests {
         let rows = rows(None, PcTime::monotonic(0));
         assert_eq!(
             values(&rows),
-            [("GNSS 受信機", "問い合わせ中"), ("衛星", "--")]
+            [("GNSS receiver", "Querying"), ("Satellites", "--")]
         );
     }
 }

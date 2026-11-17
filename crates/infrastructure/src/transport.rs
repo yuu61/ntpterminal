@@ -25,6 +25,7 @@ use core::fmt;
 use core::net::SocketAddr;
 use std::io;
 
+use application::description::{HardwareTimestampInfo, NtpTransportInfo, NtpTransportKind};
 use application::port::{ClockPort, PacketPort};
 use application::timestamping::TimestampingStatus;
 use domain::packet_crafting::{EthernetSpec, HeaderTemplate, MacAddr};
@@ -48,6 +49,7 @@ pub enum TransportMode {
 }
 
 impl TransportMode {
+    /// エラーの文言に使う名前。
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -93,14 +95,14 @@ pub struct TransportOptions {
 
 pub struct OpenedTransport {
     pub port: Box<dyn PacketPort>,
-    /// 画面に出す説明（link モードではインターフェースと宛先 MAC も含む）
-    pub description: String,
+    /// 開いたもの（link モードではインターフェースと宛先 MAC、ハードウェアのタイムスタンプでは NIC も）
+    pub info: NtpTransportInfo,
 }
 
 impl fmt::Debug for OpenedTransport {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenedTransport")
-            .field("description", &self.description)
+            .field("info", &self.info)
             .finish_non_exhaustive()
     }
 }
@@ -125,7 +127,10 @@ pub fn open(
             let (transport, hardware) = open_udp(server, &options, clock, status)?;
             Ok(OpenedTransport {
                 port: Box::new(transport),
-                description: describe(mode.label().to_owned(), hardware),
+                info: NtpTransportInfo {
+                    kind: NtpTransportKind::Udp,
+                    hardware,
+                },
             })
         }
         TransportMode::RawIp | TransportMode::Link => {
@@ -134,23 +139,15 @@ pub fn open(
     }
 }
 
-/// 画面に出す説明。ハードウェアのタイムスタンプを使うときは、使う NIC も足す。
-fn describe(base: String, hardware: Option<String>) -> String {
-    match hardware {
-        Some(nic) => format!("{base}・{nic}"),
-        None => base,
-    }
-}
-
 /// UDP の送受信の口を開き、モードに応じてカーネル（とハードウェア）のタイムスタンプを有効にする。
-/// ハードウェアを使うときは、その説明も返す。
+/// ハードウェアを使うときは、使う NIC も返す。
 #[cfg(target_os = "linux")]
 fn open_udp(
     server: SocketAddr,
     options: &TransportOptions,
     clock: Arc<dyn ClockPort>,
     status: Arc<TimestampingStatus>,
-) -> io::Result<(UdpTransport, Option<String>)> {
+) -> io::Result<(UdpTransport, Option<HardwareTimestampInfo>)> {
     let mut transport = UdpTransport::connect_from(server, options.source_port, clock)?;
     let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
     Ok((transport, hardware))
@@ -163,7 +160,7 @@ fn open_udp(
     options: &TransportOptions,
     clock: Arc<dyn ClockPort>,
     _status: Arc<TimestampingStatus>,
-) -> io::Result<(UdpTransport, Option<String>)> {
+) -> io::Result<(UdpTransport, Option<HardwareTimestampInfo>)> {
     Ok((
         UdpTransport::connect_from(server, options.source_port, clock)?,
         None,
@@ -223,8 +220,11 @@ fn validate(mode: TransportMode, options: &TransportOptions) -> io::Result<()> {
 #[cfg(target_os = "linux")]
 trait TimestampingTarget {
     fn enable_kernel(&mut self, status: Arc<TimestampingStatus>) -> io::Result<()>;
-    /// 画面に出す説明を返す。
-    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String>;
+    /// 使う NIC を返す。
+    fn enable_hardware(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<HardwareTimestampInfo>;
 }
 
 #[cfg(target_os = "linux")]
@@ -233,7 +233,10 @@ impl TimestampingTarget for UdpTransport {
         self.enable_kernel_timestamps(status)
     }
 
-    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+    fn enable_hardware(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<HardwareTimestampInfo> {
         self.enable_hardware_timestamps(status)
     }
 }
@@ -244,7 +247,10 @@ impl TimestampingTarget for RawIpTransport {
         self.enable_kernel_timestamps(status)
     }
 
-    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+    fn enable_hardware(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<HardwareTimestampInfo> {
         self.enable_hardware_timestamps(status)
     }
 }
@@ -255,19 +261,22 @@ impl TimestampingTarget for LinkTransport {
         self.enable_kernel_timestamps(status)
     }
 
-    fn enable_hardware(&mut self, status: Arc<TimestampingStatus>) -> io::Result<String> {
+    fn enable_hardware(
+        &mut self,
+        status: Arc<TimestampingStatus>,
+    ) -> io::Result<HardwareTimestampInfo> {
         self.enable_hardware_timestamps(status)
     }
 }
 
 /// タイムスタンプを、モードに応じて有効にする（Auto では失敗しても続ける）。
-/// ハードウェアを使うときは、その説明を返す。
+/// ハードウェアを使うときは、使う NIC を返す。
 #[cfg(target_os = "linux")]
 fn apply_timestamping(
     mode: TimestampingMode,
     target: &mut impl TimestampingTarget,
     status: Arc<TimestampingStatus>,
-) -> io::Result<Option<String>> {
+) -> io::Result<Option<HardwareTimestampInfo>> {
     match mode {
         TimestampingMode::User => Ok(None),
         TimestampingMode::Kernel => target
@@ -310,17 +319,22 @@ fn open_linux_only(
             clock,
         )?;
         let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
-        let description = describe(transport.description(), hardware);
         return Ok(OpenedTransport {
+            info: NtpTransportInfo {
+                kind: transport.kind(),
+                hardware,
+            },
             port: Box::new(transport),
-            description,
         });
     }
     let mut transport = RawIpTransport::connect(server, options.source_port, headers, clock)?;
     let hardware = apply_timestamping(options.timestamping, &mut transport, status)?;
     Ok(OpenedTransport {
         port: Box::new(transport),
-        description: describe(mode.label().to_owned(), hardware),
+        info: NtpTransportInfo {
+            kind: NtpTransportKind::RawIp,
+            hardware,
+        },
     })
 }
 
@@ -387,18 +401,6 @@ mod tests {
         let counts = status.counts();
         assert!(!counts.hardware_enabled, "{counts:?}");
         assert!(!counts.kernel_enabled, "{counts:?}");
-    }
-
-    #[test]
-    fn description_names_the_hardware_clock() {
-        assert_eq!(describe("UDP ソケット".to_owned(), None), "UDP ソケット");
-        assert_eq!(
-            describe(
-                "UDP ソケット".to_owned(),
-                Some("nic0 の HW 時刻".to_owned())
-            ),
-            "UDP ソケット・nic0 の HW 時刻"
-        );
     }
 
     #[cfg(not(target_os = "linux"))]

@@ -74,7 +74,7 @@ fn reads_a_real_phc() {
     let index: u32 = env::var("NTPTERMINAL_PHC").unwrap().parse().unwrap();
     let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
     let mut opened = ptp4l::open_phc(index, Arc::clone(&clock)).unwrap();
-    println!("{}（{}）", opened.path, opened.method);
+    println!("{}（{:?}）", opened.path, opened.method);
     let mut previous = None;
     for _ in 0u8..5 {
         let reading = opened.port.read().unwrap();

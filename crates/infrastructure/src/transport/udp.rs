@@ -5,6 +5,8 @@ use core::time::Duration;
 use std::io::{self, ErrorKind};
 use std::net::UdpSocket;
 
+#[cfg(target_os = "linux")]
+use application::description::HardwareTimestampInfo;
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 #[cfg(target_os = "linux")]
 use application::timestamping::TimestampingStatus;
@@ -85,7 +87,7 @@ impl UdpTransport {
     }
 
     /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
-    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。root が必要。
+    /// 使う NIC を返す。root が必要。
     ///
     /// # Errors
     ///
@@ -94,16 +96,16 @@ impl UdpTransport {
     pub fn enable_hardware_timestamps(
         &mut self,
         status: Arc<TimestampingStatus>,
-    ) -> io::Result<String> {
+    ) -> io::Result<HardwareTimestampInfo> {
         let hardware = HardwareClock::prepare(self.socket.local_addr()?.ip())?;
-        let description = hardware.description();
+        let info = hardware.info();
         self.kernel = Some(KernelTimestamper::enable_hardware(
             &self.socket,
             &self.socket,
             status,
             hardware,
         )?);
-        Ok(description)
+        Ok(info)
     }
 
     /// bind したローカルのアドレス。

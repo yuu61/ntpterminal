@@ -7,6 +7,7 @@ use alloc::sync::Arc;
 use core::fmt;
 use std::io::Write;
 
+use application::description::PtpTransportInfo;
 use application::port::MasterEventSink;
 use application::snapshot::MasterSnapshot;
 use application::timestamping::TimestampingStatus;
@@ -19,8 +20,8 @@ use super::render_rows;
 use super::stats::{RunningStats, describe, frequency_text, stats_json};
 use crate::format::ptp::{
     clock_class_label, format_nanos, intervals_label, master_label, master_state_key,
-    master_state_label, ptp_leap_key, ptp_leap_label, time_source_key, time_source_label,
-    utc_offset_label,
+    master_state_label, ptp_leap_key, ptp_leap_label, ptp_transport_label, time_source_key,
+    time_source_label, utc_offset_label,
 };
 use crate::format::{
     DisplayZone, format_date_time, format_offset_ms, format_rfc3339_utc, timestamping_breakdown,
@@ -30,8 +31,8 @@ use crate::format::{
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MasterTarget {
     pub domain: u8,
-    /// 送受信の説明（"nic0 192.168.10.200・UDP 319/320・マルチキャスト"）
-    pub transport: String,
+    /// 送受信の口
+    pub transport: PtpTransportInfo,
 }
 
 impl MasterTarget {
@@ -39,6 +40,12 @@ impl MasterTarget {
     #[must_use]
     pub fn label(&self) -> String {
         format!("PTP のマスタ（ドメイン {}）", self.domain)
+    }
+
+    /// 送受信の説明: "nic0 192.168.10.200・UDP 319/320・マルチキャスト"
+    #[must_use]
+    pub fn transport_label(&self) -> String {
+        ptp_transport_label(&self.transport)
     }
 }
 
@@ -54,7 +61,7 @@ pub fn render_once_text(
     let text = |value: Option<String>| value.unwrap_or_else(|| "--".to_owned());
     let mut rows = vec![
         ("問い合わせ先", target.label()),
-        ("送受信", target.transport.clone()),
+        ("送受信", target.transport_label()),
         ("タイムスタンプ", timestamping.to_owned()),
         ("状態", master_state_label(snapshot)),
         (
@@ -110,7 +117,7 @@ pub fn render_once_json(
     json!({
         "ok": true,
         "domain": target.domain,
-        "transport": target.transport,
+        "transport": target.transport_label(),
         "timestamping": timestamping,
         "state": master_state_key(snapshot.state),
         "synchronized": snapshot.state.shows_time(),
@@ -128,7 +135,7 @@ pub fn render_once_error_json(target: &MasterTarget, error: &str) -> String {
     json!({
         "ok": false,
         "domain": target.domain,
-        "transport": target.transport,
+        "transport": target.transport_label(),
         "error": error,
     })
     .to_string()
@@ -211,7 +218,7 @@ impl<W: Write> MasterStatsReporter<W> {
                 self.out,
                 "{} に問い合わせます（{}）",
                 self.target.label(),
-                self.target.transport
+                self.target.transport_label()
             ));
         }
     }
@@ -276,7 +283,7 @@ impl<W: Write> MasterStatsReporter<W> {
         json!({
             "event": "summary",
             "domain": self.target.domain,
-            "transport": self.target.transport,
+            "transport": self.target.transport_label(),
             "announces": stats.announces,
             "syncs": stats.syncs,
             "requests": stats.requests,
@@ -319,7 +326,7 @@ impl<W: Write> MasterStatsReporter<W> {
                 format_offset_ms(sample.offset().delta()),
                 format_nanos(sample.delay().delta() / 2)
             ),
-            MasterEvent::ExchangeFailed { seq, detail } => format!("#{seq:<5} {detail}"),
+            MasterEvent::ExchangeFailed { seq, failure } => format!("#{seq:<5} {failure}"),
             MasterEvent::ClockStepDetected { step } => format!(
                 "       時刻の段差を検出: {}（それまでの測定を捨てて合わせ直した）",
                 format_offset_ms(step)
@@ -358,8 +365,8 @@ impl<W: Write> MasterStatsReporter<W> {
                 "precise_timestamps": precise,
                 "state": master_state_key(snapshot.state),
             }),
-            MasterEvent::ExchangeFailed { seq, detail } => {
-                json!({ "event": "exchange_failed", "seq": seq, "detail": detail })
+            MasterEvent::ExchangeFailed { seq, failure } => {
+                json!({ "event": "exchange_failed", "seq": seq, "detail": failure.to_string() })
             }
             MasterEvent::ClockStepDetected { step } => json!({
                 "event": "step_detected",
@@ -407,10 +414,10 @@ impl<W: Write> MasterEventSink for MasterStatsReporter<W> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use core::net::SocketAddr;
+    use core::net::{Ipv4Addr, SocketAddr};
     use domain::ptp_clock::{
-        ClockIdentity, ClockQuality, LeapWarning, MasterState, MasterStats, PortIdentity,
-        TimeProperties, TimeSourceKind,
+        ClockIdentity, ClockQuality, ExchangeFailure, LeapWarning, MasterState, MasterStats,
+        PortIdentity, TimeProperties, TimeSourceKind,
     };
     use domain::shared_kernel::{LocalStamp, NtpTimestamp, PcTime};
     use domain::time_sync::Sample;
@@ -496,7 +503,12 @@ mod tests {
     fn target() -> MasterTarget {
         MasterTarget {
             domain: 0,
-            transport: "ptp-vs 10.99.0.2・UDP 319/320・マルチキャスト".to_owned(),
+            transport: PtpTransportInfo {
+                interface: Some("ptp-vs".to_owned()),
+                local: Ipv4Addr::new(10, 99, 0, 2),
+                event_port: 319,
+                unicast_to: None,
+            },
         }
     }
 
@@ -548,7 +560,7 @@ mod tests {
         reporter.publish(
             &MasterEvent::ExchangeFailed {
                 seq: 1,
-                detail: "Delay_Resp が届きません".to_owned(),
+                failure: ExchangeFailure::DelayRespMissing,
             },
             &snap,
         );

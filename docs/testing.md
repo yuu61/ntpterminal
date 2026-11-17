@@ -27,7 +27,7 @@ cargo run -- tui 127.0.0.1:12300                          # q / Esc / Ctrl+C で
 ```sh
 tmux new-session -d -s ntp -x 120 -y 40 -n sim "$BIN sim-server --offset-ms -0.978 --refid GNSS"
 tmux new-window -t ntp -n tui "$BIN tui 127.0.0.1:12300"
-tmux capture-pane -t ntp:tui -p     # 「同期済み」が出たら準備完了
+tmux capture-pane -t ntp:tui -p     # 「Synchronized」が出たら準備完了
 tmux send-keys -t ntp:tui q; tmux kill-session -t ntp
 ```
 
@@ -60,7 +60,7 @@ cargo run -- sim-server --offset-ms -0.978 --refid GNSS --snmp-mib meinberg-ltng
 cargo run -- tui 127.0.0.1:12300 --snmp-community public --snmp-port 16100
 ```
 
-情報欄の「Ref ID」の下に「GNSS 受信機」と「衛星」の 2 行が出る（`--snmp-community` を付けたときだけ）。
+情報欄の Ref ID の下に GNSS receiver と Satellites の 2 行が出る（`--snmp-community` を付けたときだけ）。
 MIB は自動で判定する。`tui --snmp-mib` で固定もでき、固定した MIB が応答しなければ、ほかの MIB に切り替えずに
 エラーを出す。疑似エージェントの衛星の数は 20 秒ごとに変わる。microchip-s650 では、衛星が多いと一覧が
 128 バイトで切れて衛星系の内訳が出なくなる（実機と同じ）。疑似エージェントは net-snmp でも読める:
@@ -71,7 +71,7 @@ MIB は自動で判定する。`tui --snmp-mib` で固定もでき、固定し�
 
 ## 推移のグラフ
 
-情報欄の下の「直近 N 回の測定値」（推移のグラフ）は、`tui --trend` を付けたときだけ出す（既定では出さない）。
+情報欄の下の `Last N samples`（推移のグラフ）は、`tui --trend` を付けたときだけ出す（既定では出さない）。
 付けても、出して時計の倍率が変わらない大きさの端末でだけ出る。120×40 なら出るが、80×24 では出ない。
 
 ## ハードウェアタイムスタンプ（NIC の時計）
@@ -155,7 +155,8 @@ PC の時計を合わせていればほぼ 0 になることを確かめる。pt
   （設定を変えずに、いまの設定で足りるか確かめるだけ。`all` なら足りる）を書く
 - マスタのいない LAN で `clientOnly 1`・`network_transport L2` にすると、ptp4l は LISTENING のまま何も送らない。
   この状態でも PHC は読むので、`once`（終了コード 1）・`stats`・`tui`（大きな時計は `--:--:--.---`）の表示と、
-  ptp4l が知らせる PHC・読み方（「同時読み取り」）を確かめられる（2026-11 に I219-V・linuxptp 4.2 で確認）
+  ptp4l が知らせる PHC・読み方（`once`・`stats` では「同時読み取り」、`tui` では `simultaneous read`）を確かめられる
+  （2026-11 に I219-V・linuxptp 4.2 で確認）
 
 ## PTP のマスタに問い合わせる（`--ptp`）
 
@@ -171,9 +172,10 @@ cargo run -- sim-ptp-master --port 12319 --to 127.0.0.1:13319 --interface 127.0.
 cargo run -- tui --ptp --ptp-port 13319 --ptp-interface 127.0.0.1 --ptp-master 127.0.0.1:12319 --trend   # 別の端末で
 ```
 
-マスタを選ぶまで（Announce 2 通）1 秒ほど「マスタを探しています」と出て、その後「同期済み」になり、PC との差が
-+2.5 ms 前後になる。疑似マスタは `Delay_Resp` に最小間隔を入れない（ユニキャストの応答は ptp4l と同じく
-「指定なし」）ので、「間隔」は `Delay_Req 1 秒（既定の最小間隔）` になる。
+マスタを選ぶまで（Announce 2 通）1 秒ほど `Looking for master (domain 0)` と出て、その後 `Synchronized` になり、
+PC offset（PC との差）が +2.5 ms 前後になる。疑似マスタは `Delay_Resp` に最小間隔を入れない（ユニキャストの応答は
+ptp4l と同じく「指定なし」）ので、Intervals は `Delay_Req 1 s (default minimum)` になる
+（`once --ptp` では「間隔」が `Delay_Req 1 秒（既定の最小間隔）`）。
 
 ### 本物の ptp4l のマスタ（Linux・root。LAN には何も流れない）
 
