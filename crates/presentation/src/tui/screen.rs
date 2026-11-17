@@ -17,7 +17,7 @@ use domain::time_sync::SyncState;
 
 use super::big_digits::{self, BigText};
 use super::trend::{self, SampleHistory, Trend};
-use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, text, theme};
+use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, text, theme, user_text};
 use crate::format::{DisplayZone, format_clock, format_delay_ms, format_offset_ms};
 
 /// 同期前の時計の表示。
@@ -39,7 +39,8 @@ pub(crate) struct InfoRow {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ScreenModel {
-    pub title: String,
+    /// 見出しの行（字間を空け、タブを空白にしたもの。1 行以上）
+    pub title: Vec<String>,
     pub server: String,
     /// 大きい時計の文字列（"17:25:45.146"）
     pub clock: String,
@@ -51,7 +52,8 @@ pub(crate) struct ScreenModel {
     pub rows: Vec<InfoRow>,
     /// 測定値の推移。まだ測定値がなければ空
     pub trends: Vec<Trend>,
-    pub footer: Option<String>,
+    /// 最下部の一文の行（タブを空白にしたもの）。空なら出さない
+    pub footer: Vec<String>,
 }
 
 /// スナップショットと現在時刻から、画面に出す内容を組み立てる。
@@ -108,7 +110,11 @@ pub(super) fn build(
         }
     };
     ScreenModel {
-        title: config.title.clone(),
+        // 字間を空けてからタブを埋める（逆にすると、タブを埋めた空白の間にも字間が入る）
+        title: user_text::lines(&config.title)
+            .into_iter()
+            .map(|line| user_text::expand_tabs(&letter_spaced(line)))
+            .collect(),
         server: config.server_label.clone(),
         clock: shown.map_or_else(
             || CLOCK_PLACEHOLDER.to_owned(),
@@ -124,7 +130,12 @@ pub(super) fn build(
         } else {
             Vec::new()
         },
-        footer: config.footer.clone(),
+        footer: config.footer.as_deref().map_or_else(Vec::new, |footer| {
+            user_text::lines(footer)
+                .into_iter()
+                .map(user_text::expand_tabs)
+                .collect()
+        }),
     }
 }
 
@@ -271,6 +282,19 @@ fn width_of(line: &Line<'_>) -> u16 {
     u16::try_from(line.width()).unwrap_or(u16::MAX)
 }
 
+/// 行の数（`u16` に収まらなければ飽和させる）。
+fn count(len: usize) -> u16 {
+    u16::try_from(len).unwrap_or(u16::MAX)
+}
+
+/// 行を `y` から下へ順に、それぞれ左右中央に描く。
+fn put_lines(buf: &mut Buffer, area: Rect, mut y: u16, lines: &[String], style: Style) {
+    for line in lines {
+        put_centered(buf, area, y, &Line::styled(line.as_str(), style));
+        y = y.saturating_add(1);
+    }
+}
+
 /// 1 行を左右中央に描く。`area` の外なら描かない。
 fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
     if y < area.y || y >= area.bottom() {
@@ -283,11 +307,17 @@ fn put_centered(buf: &mut Buffer, area: Rect, y: u16, line: &Line<'_>) {
 /// 座標の計算はすべて `u16` の飽和演算（`saturating_*`）で行う。端末を極端に縮めてもパニックしないように。
 impl Widget for &ScreenModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        // 縦の並び: 見出し / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 /
-        //           (空行 / 推移) / (空行 / 最下部の一文)
-        let rows = u16::try_from(self.rows.len()).unwrap_or(u16::MAX);
-        let footer_rows = if self.footer.is_some() { 2 } else { 0 };
-        let base = 6u16.saturating_add(rows).saturating_add(footer_rows);
+        // 縦の並び: 見出し（行の数） / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 /
+        //           (空行 / 推移) / (空行 / 最下部の一文（行の数）)
+        let footer_rows = if self.footer.is_empty() {
+            0
+        } else {
+            count(self.footer.len()).saturating_add(1)
+        };
+        let base = 5u16
+            .saturating_add(count(self.title.len()))
+            .saturating_add(count(self.rows.len()))
+            .saturating_add(footer_rows);
 
         // 時計は残りの高さと幅に収まる最大の倍率で描く。倍率 1 でも入らなければ普通の文字で出す
         let fit = |extra: u16| {
@@ -314,13 +344,8 @@ impl Widget for &ScreenModel {
         let mut y = area.y + area.height.saturating_sub(total) / 2;
 
         let accent = Style::new().fg(theme::ACCENT).add_modifier(Modifier::BOLD);
-        put_centered(
-            buf,
-            area,
-            y,
-            &Line::styled(letter_spaced(&self.title), accent),
-        );
-        y = y.saturating_add(1);
+        put_lines(buf, area, y, &self.title, accent);
+        y = y.saturating_add(count(self.title.len()));
         put_centered(
             buf,
             area,
@@ -365,10 +390,13 @@ impl Widget for &ScreenModel {
             y = y.saturating_add(trend_rows);
         }
 
-        if let Some(footer) = self.footer.as_ref() {
-            let line = Line::styled(footer.as_str(), Style::new().fg(theme::FOOTER));
-            put_centered(buf, area, y.saturating_add(1), &line);
-        }
+        put_lines(
+            buf,
+            area,
+            y.saturating_add(1),
+            &self.footer,
+            Style::new().fg(theme::FOOTER),
+        );
     }
 }
 
@@ -686,6 +714,94 @@ mod tests {
         assert!(row_of("Last 3 samples") < row_of("Sponsored by Example Inc."));
     }
 
+    /// 見出しと最下部の一文は、改行で複数行になり（末尾の改行は数えない）、行ごとに左右中央に置く。
+    /// タブは空白で埋める（見出しは字間を空けてから）。
+    #[test]
+    fn multi_line_title_and_footer_are_centered_line_by_line() {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let config = with_trend(TuiConfig {
+            title: "NTP CLOCK\nBooth\tA-12".into(),
+            ..config(Some("Sponsored by\nExample Inc.\tand friends\n"))
+        });
+        let model = build(
+            &config,
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
+            None,
+            &recent_history(),
+            Some(shown),
+            now,
+        );
+        // "B o o t h " の 10 桁の後のタブは 16 桁目まで埋め、その後に字間の空白が付く
+        let booth = format!("B o o t h{}A - 1 2", " ".repeat(8));
+        assert_eq!(model.title, ["N T P   C L O C K", booth.as_str()]);
+        assert_eq!(
+            model.footer,
+            ["Sponsored by", "Example Inc.    and friends"]
+        );
+
+        let lines = render_text(&model, 120, 40);
+        // 目視確認用: cargo test -p ntpterminal-presentation multi_line_title -- --nocapture
+        println!("{}", lines.join("\n"));
+        let row_of = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
+        let order = [
+            "N T P   C L O C K",
+            booth.as_str(),
+            "192.168.1.123",
+            "Last 3 samples",
+            "Sponsored by",
+            "Example Inc.    and friends",
+        ];
+        for (above, below) in order.iter().zip(order.iter().skip(1)) {
+            assert!(row_of(above) < row_of(below), "{above} / {below}");
+        }
+        // 行ごとに左右中央（120 桁）
+        for text in ["Sponsored by", "Example Inc.    and friends"] {
+            let left = (120 - text.len()) / 2;
+            assert_eq!(lines[row_of(text)], format!("{}{text}", " ".repeat(left)));
+        }
+        // 行が増えても、余裕があれば時計（倍率 2 の 5 行）は縮まない
+        assert_eq!(lines.iter().filter(|line| line.contains('█')).count(), 5);
+    }
+
+    /// 行が増えて大きい時計が入らなくなったら、画面の外にはみ出さず、普通の文字の時計にする。
+    #[test]
+    fn extra_lines_shrink_the_clock_instead_of_overflowing() {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        // 80×24 では、1 行の見出しと最下部の一文なら倍率 1（3 行）の時計を描いて 2 行余る。3 行増やすと入らない
+        for (title, footer) in [
+            ("NTP CLOCK", "footer 1\nfooter 2\nfooter 3\nfooter 4"),
+            ("NTP CLOCK\nBooth A-12", "footer 1\nfooter 2\nfooter 3"),
+        ] {
+            let config = TuiConfig {
+                title: title.into(),
+                ..config(Some(footer))
+            };
+            let model = build(
+                &config,
+                Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
+                None,
+                &SampleHistory::default(),
+                Some(shown),
+                now,
+            );
+            let lines = render_text(&model, 80, 24);
+            let text = lines.join("\n");
+            assert!(!text.contains(['█', '▀', '▄']), "{text}");
+            assert!(text.contains(&model.clock), "{text}");
+            for line in title
+                .lines()
+                .map(letter_spaced)
+                .chain(footer.lines().map(str::to_owned))
+            {
+                assert!(text.contains(&line), "{line} がありません\n{text}");
+            }
+        }
+    }
+
     #[test]
     fn trends_are_hidden_by_default() {
         let snapshot = synced_snapshot();
@@ -750,24 +866,30 @@ mod tests {
         let snapshot = synced_snapshot();
         let now = seven_seconds_later();
         let shown = snapshot.anchor.unwrap().project(now).unwrap();
-        let model = build(
-            &with_trend(config(Some("footer"))),
-            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
-            None,
-            &recent_history(),
-            Some(shown),
-            now,
-        );
-        for (width, height) in [
-            (0, 0),
-            (1, 1),
-            (20, 5),
-            (40, 10),
-            (49, 30),
-            (80, 24),
-            (300, 100),
-        ] {
-            drop(render_text(&model, width, height));
+        let multi_line = TuiConfig {
+            title: "NTP CLOCK\n\tBooth\t協賛".into(),
+            ..config(Some("A\n\nB\tC\n".repeat(20).as_str()))
+        };
+        for config in [with_trend(config(Some("footer"))), with_trend(multi_line)] {
+            let model = build(
+                &config,
+                Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
+                None,
+                &recent_history(),
+                Some(shown),
+                now,
+            );
+            for (width, height) in [
+                (0, 0),
+                (1, 1),
+                (20, 5),
+                (40, 10),
+                (49, 30),
+                (80, 24),
+                (300, 100),
+            ] {
+                drop(render_text(&model, width, height));
+            }
         }
     }
 
@@ -1182,12 +1304,12 @@ mod tests {
     /// 描いた結果だけでなく、画面の内容（行の値など。狭い端末で切れて見えなくなるものも）も確かめる。
     fn assert_ascii(model: &ScreenModel) {
         let mut texts = vec![
-            model.title.clone(),
             model.server.clone(),
             model.clock.clone(),
             model.zone_label.clone(),
             model.status.clone(),
         ];
+        texts.extend(model.title.clone());
         texts.extend(model.date.clone());
         texts.extend(model.footer.clone());
         for row in &model.rows {

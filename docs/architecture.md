@@ -176,4 +176,5 @@ ptp4l が合わせる PHC の表示に使う口は transport の外にある（�
 | 大きな数字の描画方法（ブロック文字を避ける理由）     | [`tui/big_digits.rs`](../crates/presentation/src/tui/big_digits.rs)         |
 | 推移のグラフ、受信機の行、配色                       | [`tui/trend.rs`](../crates/presentation/src/tui/trend.rs)、[`tui/receiver.rs`](../crates/presentation/src/tui/receiver.rs)、[`tui/theme.rs`](../crates/presentation/src/tui/theme.rs) |
 | TUI の文言（英語・ASCII だけにする理由）             | [`tui/text.rs`](../crates/presentation/src/tui/text.rs)                     |
+| 見出し・最下部の一文の書き方（`\n`・`\t`、複数行の並べ方） | [`tui/user_text.rs`](../crates/presentation/src/tui/user_text.rs)     |
 | lint を無効にしてよい基準                            | [`Cargo.toml`](../Cargo.toml) の `[workspace.lints]`                        |

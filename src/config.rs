@@ -14,6 +14,8 @@
 //! - 知らないキーはエラーにする（綴りの誤りを黙って無視しない）。値の範囲と形式はコマンドラインと同じ関数で
 //!   確かめ、誤りは行と列を添えて知らせる。値どうしの組み合わせ（udp で `dscp` など）は、コマンドラインの値と
 //!   合わせた後で、コマンドラインと同じ場所（送受信の準備）で確かめる
+//! - `title`・`footer` の `\n`（改行）・`\t`（タブ）・`\\` も、コマンドラインと同じ関数で解く。`"..."` では TOML の
+//!   エスケープが先に解かれる（`"\n"` も改行になり、`\` そのものは `"\\\\"`）。`'...'` ならコマンドラインと同じ書き方
 //! - `--allow-fast-poll` は書けない。設定ファイルで許すと、コマンドラインで公開サーバを指定したときにも
 //!   短い間隔で問い合わせてしまうため、毎回コマンドラインで指定する
 
@@ -25,6 +27,7 @@ use std::path::PathBuf;
 use application::usecase::PhcRequest;
 use domain::packet_crafting::{MacAddr, UdpChecksum};
 use presentation::format::DisplayZone;
+use presentation::tui::parse_user_text;
 use serde::de::Error as _;
 use serde::{Deserialize, Deserializer};
 use toml::de::Error as TomlError;
@@ -89,7 +92,9 @@ pub(crate) struct ConfigFile {
 #[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
 struct TuiSection {
     interval_ms: Option<u64>,
+    #[serde(deserialize_with = "user_text")]
     title: Option<String>,
+    #[serde(deserialize_with = "user_text")]
     footer: Option<String>,
     trend: Option<bool>,
     snmp_community: Option<String>,
@@ -476,6 +481,15 @@ where
     parsed(deserializer, RefId::from_str)
 }
 
+/// 見出し・最下部の一文。`"..."` では TOML のエスケープを解いた後の値を、コマンドラインと同じく読む
+/// （`\n` などの書き方は `presentation::tui::parse_user_text`）。
+fn user_text<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    parsed(deserializer, parse_user_text)
+}
+
 #[cfg(test)]
 mod tests {
     use alloc::sync::Arc;
@@ -551,6 +565,10 @@ mod tests {
             Some(MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]))
         );
         assert_eq!(file.tui.trend, Some(true));
+        assert_eq!(
+            file.tui.footer.as_deref(),
+            Some("Sponsored by ...\nBooth A-12")
+        );
         assert_eq!(file.stats.count, Some(20));
         assert_eq!(file.sim_server.offset_ms, Some(-0.978f64));
         assert_eq!(file.sim_server.refid, Some(RefId("GNSS".to_owned())));
@@ -929,6 +947,8 @@ title = "BOOTH"
             ("dst-mac = \"00:11:22\"", "aa:bb:cc:dd:ee:ff"),
             ("transport = \"raw_ip\"", "raw-ip"),
             ("[sim-server]\nrefid = \"TOOLONG\"", "4 文字以内"),
+            ("[tui]\nfooter = 'C:\\Users'", ": \\U"),
+            ("[tui]\ntitle = \"A\\u0007\"", "制御文字"),
         ] {
             let message = parse_error(file);
             assert!(
@@ -936,6 +956,50 @@ title = "BOOTH"
                 "{file}: {message}"
             );
         }
+    }
+
+    /// 見出し・最下部の一文の `\n`・`\t`・`\\` は、コマンドラインと設定ファイルで同じに読む。
+    /// `"..."` は TOML のエスケープが先に解かれる。CR LF で保存した `"""` も LF になる。
+    #[test]
+    fn title_and_footer_escapes_match_command_line() {
+        let expected = "A\nB\tC\\D";
+        let Command::Tui(cli) = merged("", &["tui", "--title", r"A\nB\tC\\D", "--footer", "A\nB"])
+        else {
+            panic!("tui のはず");
+        };
+        assert_eq!(cli.title.as_deref(), Some(expected));
+        // 改行そのもの（PowerShell の `n など）も使える
+        assert_eq!(cli.footer.as_deref(), Some("A\nB"));
+
+        let footer = |file: &str| {
+            let Command::Tui(tui) = merged(file, &["tui"]) else {
+                panic!("tui のはず");
+            };
+            tui.footer.unwrap()
+        };
+        // '...' はコマンドラインと同じ書き方
+        assert_eq!(footer("[tui]\nfooter = 'A\\nB\\tC\\\\D'\n"), expected);
+        // "..." は TOML のエスケープが先に解かれる（\ そのものは \\\\）
+        assert_eq!(footer("[tui]\nfooter = \"A\\nB\\tC\\\\\\\\D\"\n"), expected);
+        // """ は閉じの前の改行が値に残る（画面では行に数えない）。CR LF でも LF になる
+        for newline in ["\n", "\r\n"] {
+            let file = [
+                "[tui]",
+                "footer = \"\"\"",
+                "A",
+                "B\\tC\\\\\\\\D",
+                "\"\"\"",
+                "",
+            ]
+            .join(newline);
+            assert_eq!(footer(&file), format!("{expected}\n"), "{file:?}");
+        }
+
+        let Err(error) = Cli::try_parse_from(["ntpterminal", "tui", "--footer", r"C:\Users"])
+        else {
+            panic!("C:\\Users はエラーのはず");
+        };
+        assert!(error.to_string().contains(r": \U"), "{error}");
     }
 
     #[test]

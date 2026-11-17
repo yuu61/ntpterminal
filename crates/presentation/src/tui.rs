@@ -19,11 +19,13 @@ mod snapshot_sender;
 mod text;
 mod theme;
 mod trend;
+mod user_text;
 
 pub use app::run;
 pub use receiver::mib_label;
 pub use snapshot_sender::{MasterSnapshotSender, PhcSnapshotSender, SnapshotSender};
 pub use text::{master_server_label, phc_server_label};
+pub use user_text::parse_user_text;
 
 use alloc::sync::Arc;
 
@@ -114,11 +116,12 @@ pub enum TuiSource {
 
 #[derive(Clone, Debug)]
 pub struct TuiConfig {
-    /// 最上部の見出し（字間を空けて表示する）
+    /// 最上部の見出し（字間を空けて表示する）。改行で複数行になり、タブは空白にして出す
+    /// （利用者の指定は [`parse_user_text`] でエスケープを解いてから渡す）
     pub title: String,
     /// 見出しの下に出すサーバ名（ptp4l・PTP のマスタでは [`phc_server_label`]・[`master_server_label`]）
     pub server_label: String,
-    /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない
+    /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない。改行とタブは `title` と同じ
     pub footer: Option<String>,
     /// 測定値の推移のグラフを出すか（既定では出さない）
     pub trend: bool,

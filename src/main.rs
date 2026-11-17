@@ -630,11 +630,11 @@ struct TuiArgs {
     /// 公開サーバへの短い間隔のポーリングを許可する（自分で管理するサーバに限ること。設定ファイルには書けない）
     #[arg(long)]
     allow_fast_poll: bool,
-    /// 最上部の見出し（既定: NTP CLOCK）
-    #[arg(long)]
+    /// 最上部の見出し（\n で改行、\t でタブ、\\ で \ そのもの。既定: NTP CLOCK）
+    #[arg(long, value_parser = tui::parse_user_text)]
     title: Option<String>,
-    /// 最下部に出す一文（スポンサー表記など）
-    #[arg(long)]
+    /// 最下部に出す一文（スポンサー表記など。\n で改行、\t でタブ、\\ で \ そのもの）
+    #[arg(long, value_parser = tui::parse_user_text)]
     footer: Option<String>,
     /// 直近の測定値の推移（オフセットと遅延の棒グラフ）を出す。時計が縮まない大きさの端末でだけ出る
     #[arg(long)]
