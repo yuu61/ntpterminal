@@ -10,23 +10,21 @@
 
 use ratatui::style::Color;
 
+use application::description::PtpTransportInfo;
 use application::snapshot::MasterSnapshot;
 use application::timestamping::{TimestampSource, TimestampingStatus};
 use domain::ptp_clock::{LeapWarning, MasterState};
-use domain::shared_kernel::{PcTime, TimeDelta};
+use domain::shared_kernel::PcTime;
 
-use super::screen::{InfoRow, NO_VALUE, tone};
-use super::theme;
-use crate::format::ptp::{
-    clock_class_label, format_nanos, intervals_label, master_label, master_state_label,
-    ptp_leap_label, time_source_label, utc_offset_label,
-};
-use crate::format::{format_offset_ms, timestamping_label};
+use super::screen::{InfoRow, NO_VALUE, SUCCESS_LABEL, tone};
+use super::{text, theme};
+use crate::format::format_offset_ms;
+use crate::format::ptp::format_nanos;
 
 /// 状態の行の文言と色。
 pub(super) fn status(snapshot: Option<&MasterSnapshot>) -> (String, Color) {
     let Some(snap) = snapshot else {
-        return ("マスタを探しています".to_owned(), theme::LABEL);
+        return ("Looking for master".to_owned(), theme::LABEL);
     };
     let color = match snap.state {
         MasterState::Synchronized => theme::GOOD,
@@ -34,13 +32,13 @@ pub(super) fn status(snapshot: Option<&MasterSnapshot>) -> (String, Color) {
         MasterState::Listening | MasterState::Uncalibrated => theme::LABEL,
         MasterState::Holdover => theme::WARN,
     };
-    (master_state_label(snap), color)
+    (text::master_state(snap), color)
 }
 
-/// 情報欄。`transport` は送受信の説明、`timestamping` はタイムスタンプの取得状況。
+/// 情報欄。`transport` は送受信の口、`timestamping` はタイムスタンプの取得状況。
 pub(super) fn rows(
     snapshot: Option<&MasterSnapshot>,
-    transport: &str,
+    transport: &PtpTransportInfo,
     timestamping: &TimestampingStatus,
     now: PcTime,
 ) -> Vec<InfoRow> {
@@ -53,45 +51,45 @@ pub(super) fn rows(
     let selected = snapshot.and_then(|snap| snap.selected_sample);
     let pc_offset = selected.map(|sample| sample.offset().delta());
     let (utc, utc_trusted) = status.map_or((None, true), |master| {
-        let (text, trusted) = utc_offset_label(&master.time);
-        (Some(text), trusted)
+        let (offset, trusted) = text::utc_offset(&master.time);
+        (Some(offset), trusted)
     });
     let leap = status.map(|master| master.time.leap);
     let counts = timestamping.counts();
     vec![
         row(
-            "PC との差",
-            pc_offset.map(|offset| format!("{}（マスタ − PC）", format_offset_ms(offset))),
+            "PC offset",
+            pc_offset.map(|offset| format!("{} (master - PC)", format_offset_ms(offset))),
             pc_offset.map_or(theme::TEXT, tone),
         ),
         row(
-            "経路遅延",
+            "Path delay",
             selected.map(|sample| format_nanos(sample.delay().delta() / 2)),
             theme::TEXT,
         ),
         row(
-            "マスタ",
+            "Master",
             status
-                .map(|master| master_label(&master, snapshot.and_then(|snap| snap.master_address))),
+                .map(|master| text::master(&master, snapshot.and_then(|snap| snap.master_address))),
             theme::TEXT,
         ),
         row(
-            "グランドマスタ",
+            "Grandmaster",
             status.map(|master| master.grandmaster.to_string()),
             theme::TEXT,
         ),
         row(
             "Clock class",
-            status.map(|master| clock_class_label(master.grandmaster_quality.class)),
+            status.map(|master| text::clock_class(master.grandmaster_quality.class)),
             theme::TEXT,
         ),
         row(
-            "時刻源",
-            status.map(|master| time_source_label(master.time.time_source)),
+            "Time source",
+            status.map(|master| text::time_source(master.time.time_source)),
             theme::TEXT,
         ),
         row(
-            "UTC との差",
+            "UTC offset",
             utc,
             if utc_trusted {
                 theme::TEXT
@@ -100,32 +98,36 @@ pub(super) fn rows(
             },
         ),
         row(
-            "うるう秒",
-            leap.map(|warning| ptp_leap_label(warning).to_owned()),
+            "Leap second",
+            leap.map(|warning| text::leap(warning).to_owned()),
             if leap.is_some_and(|warning| warning != LeapWarning::None) {
                 theme::WARN
             } else {
                 theme::TEXT
             },
         ),
-        row("間隔", snapshot.map(intervals_label), theme::TEXT),
+        row("Intervals", snapshot.map(text::intervals), theme::TEXT),
         row(
-            "最終取得",
+            "Last update",
             snapshot
                 .and_then(|snap| snap.last_success)
                 .and_then(|at| now.since(at).ok())
-                .map(|elapsed| format!("{:.1} 秒前", elapsed.max(TimeDelta::ZERO).as_secs_f64())),
+                .map(text::ago),
             theme::TEXT,
         ),
         row(
-            "成功/試行",
+            SUCCESS_LABEL,
             snapshot.map(|snap| format!("{}/{}", snap.stats.samples, snap.stats.requests)),
             theme::TEXT,
         ),
-        row("送受信", Some(transport.to_owned()), theme::LABEL),
         row(
-            "タイムスタンプ",
-            Some(timestamping_label(&counts).to_owned()),
+            "Transport",
+            Some(text::ptp_transport(transport)),
+            theme::LABEL,
+        ),
+        row(
+            "Timestamps",
+            Some(text::timestamping(&counts).to_owned()),
             // カーネルの時刻が、設定どおりに取れているときだけ「良好」の色にする
             if counts.last_source != TimestampSource::User
                 && counts.last_source == counts.expected_source()

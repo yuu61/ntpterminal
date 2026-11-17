@@ -33,6 +33,7 @@ use std::os::fd::AsRawFd as _;
 use std::sync::Once;
 use std::{panic, thread};
 
+use application::description::HardwareTimestampInfo;
 use nix::errno::Errno;
 use nix::ifaddrs::getifaddrs;
 use nix::libc;
@@ -96,13 +97,11 @@ impl HardwareClock {
         Some(phc_nanos - offset)
     }
 
-    /// 画面に出す説明（"nic0 の HW 時刻" など。こちらで有効にしたときは、終了時に戻すことも示す）。
-    pub(super) fn description(&self) -> String {
-        if self.setting.changed() {
-            // link モードの説明に付けても 80 桁に収まる長さにする
-            format!("{} の HW 時刻（一時的に有効化）", self.device)
-        } else {
-            format!("{} の HW 時刻", self.device)
+    /// 使う NIC（こちらで有効にしたときは、終了時に戻すことも示す）。
+    pub(super) fn info(&self) -> HardwareTimestampInfo {
+        HardwareTimestampInfo {
+            device: self.device.clone(),
+            enabled_temporarily: self.setting.changed(),
         }
     }
 }

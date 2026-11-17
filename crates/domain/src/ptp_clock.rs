@@ -21,8 +21,9 @@ mod source;
 mod status;
 
 pub use master::{
-    AnnounceInfo, DelayRespInfo, EventStamp, FollowUpInfo, MasterConfig, MasterEvent, MasterSource,
-    MasterState, MasterStats, MasterStatus, PortIdentity, SyncInfo, log_interval,
+    AnnounceInfo, DelayRespInfo, EventStamp, ExchangeFailure, FollowUpInfo, MasterConfig,
+    MasterEvent, MasterSource, MasterState, MasterStats, MasterStatus, PortIdentity, SyncInfo,
+    log_interval,
 };
 pub use phc_time::{PhcReading, PhcTime};
 pub use source::{PhcConfig, PhcEvent, PhcSource, PhcState, PhcStats};

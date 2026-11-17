@@ -22,6 +22,7 @@ use std::net::UdpSocket;
 use std::os::fd::AsRawFd as _;
 use std::time::Instant;
 
+use application::description::{HardwareTimestampInfo, NtpTransportKind};
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 use application::timestamping::TimestampingStatus;
 use domain::packet_crafting::{
@@ -141,7 +142,7 @@ impl LinkTransport {
     }
 
     /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
-    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。
+    /// 使う NIC を返す。
     ///
     /// # Errors
     ///
@@ -149,16 +150,16 @@ impl LinkTransport {
     pub fn enable_hardware_timestamps(
         &mut self,
         status: Arc<TimestampingStatus>,
-    ) -> io::Result<String> {
+    ) -> io::Result<HardwareTimestampInfo> {
         let hardware = HardwareClock::prepare((*self.local.ip()).into())?;
-        let description = hardware.description();
+        let info = hardware.info();
         self.kernel = Some(KernelTimestamper::enable_hardware(
             &self.socket,
             &self.socket,
             status,
             hardware,
         )?);
-        Ok(description)
+        Ok(info)
     }
 
     /// 送信元（IP ヘッダに入れているアドレスとポート）。
@@ -167,10 +168,13 @@ impl LinkTransport {
         self.local
     }
 
-    /// 画面に出す説明（"link（eth0 → 00:11:22:33:44:55）"）。
+    /// 送信方式（送るインターフェースと宛先 MAC）。
     #[must_use]
-    pub fn description(&self) -> String {
-        format!("link（{} → {}）", self.interface.name, self.destination_mac)
+    pub fn kind(&self) -> NtpTransportKind {
+        NtpTransportKind::Link {
+            interface: self.interface.name.clone(),
+            destination: self.destination_mac,
+        }
     }
 
     fn drain_guard(&mut self) {

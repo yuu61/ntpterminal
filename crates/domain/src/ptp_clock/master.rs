@@ -24,7 +24,7 @@ use core::fmt;
 
 use super::{ClockIdentity, ClockQuality, PhcTime, TimeProperties};
 use crate::shared_kernel::{LocalStamp, PcTime, TimeDelta};
-use crate::time_sync::{Anchor, ClockTracker, FrequencyOffset, Sample};
+use crate::time_sync::{Anchor, ClockTracker, FrequencyOffset, Sample, SampleError};
 
 /// Announce の受信を数える区間（Announce の間隔の何回分か。IEEE 1588 の `FOREIGN_MASTER_TIME_WINDOW`）
 const FOREIGN_MASTER_TIME_WINDOW: i64 = 4;
@@ -228,7 +228,7 @@ pub enum MasterEvent {
     },
     ExchangeFailed {
         seq: u16,
-        detail: String,
+        failure: ExchangeFailure,
     },
     /// マスタの時刻とモノトニック時計の関係が段差で変わった（マスタの時刻の修正・UTC との差の変化・
     /// 時刻の違うマスタへの切り替え・PC のスリープなど）。それまでの標本を捨て、新しい時刻に合わせた
@@ -239,6 +239,25 @@ pub enum MasterEvent {
         from: MasterState,
         to: MasterState,
     },
+}
+
+/// 1 回の交換（Sync・`Delay_Req`・`Delay_Resp`）が失敗した理由。
+///
+/// 文言（`Display`）は CLI のもの。TUI は種類ごとに自分の文言にする。
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum ExchangeFailure {
+    #[error("Delay_Req を送れていません")]
+    RequestNotSent,
+    #[error("Follow_Up が届きません")]
+    FollowUpMissing,
+    #[error("Delay_Resp が届きません")]
+    DelayRespMissing,
+    /// `Delay_Req` を送れなかった（送受信の口のエラーの説明）
+    #[error("{0}")]
+    SendFailed(String),
+    /// 4 つの時刻から標本を作れなかった
+    #[error(transparent)]
+    InvalidSample(#[from] SampleError),
 }
 
 /// マスタの候補（Announce の送り手 1 つ）。
@@ -335,7 +354,7 @@ pub struct MasterSource {
     last_sample: Option<Sample>,
     last_success: Option<PcTime>,
     /// 直近の交換が失敗した理由。標本を作れたら `None` に戻る
-    last_failure: Option<String>,
+    last_failure: Option<ExchangeFailure>,
     stats: MasterStats,
     other_domains: Vec<u8>,
 }
@@ -417,8 +436,8 @@ impl MasterSource {
 
     /// 直近の交換が失敗した理由（標本を作れたら `None` に戻る）。
     #[must_use]
-    pub fn last_failure(&self) -> Option<&str> {
-        self.last_failure.as_deref()
+    pub const fn last_failure(&self) -> Option<&ExchangeFailure> {
+        self.last_failure.as_ref()
     }
 
     /// 候補になっているマスタの数（選んだものを含む）。
@@ -512,13 +531,13 @@ impl MasterSource {
             && now.is_at_or_after(deadline) == Ok(true)
         {
             let missing = if exchange.sent.is_none() {
-                "Delay_Req を送れていません"
+                ExchangeFailure::RequestNotSent
             } else if exchange.sync.origin.is_none() {
-                "Follow_Up が届きません"
+                ExchangeFailure::FollowUpMissing
             } else {
-                "Delay_Resp が届きません"
+                ExchangeFailure::DelayRespMissing
             };
-            self.fail(exchange.seq, missing.to_owned(), &mut events);
+            self.fail(exchange.seq, missing, &mut events);
         }
         if self.state == MasterState::Synchronized && self.is_stale(now) {
             self.transition(MasterState::Holdover, &mut events);
@@ -655,11 +674,11 @@ impl MasterSource {
         events
     }
 
-    /// `Delay_Req` を送れなかった。
+    /// `Delay_Req` を送れなかった（`detail` は送受信の口のエラーの説明）。
     pub fn request_failed(&mut self, seq: u16, detail: String) -> Vec<MasterEvent> {
         let mut events = Vec::new();
         if self.exchange.is_some_and(|exchange| exchange.seq == seq) {
-            self.fail(seq, detail, &mut events);
+            self.fail(seq, ExchangeFailure::SendFailed(detail), &mut events);
         }
         events
     }
@@ -780,15 +799,15 @@ impl MasterSource {
                 }
                 self.transition(MasterState::Synchronized, events);
             }
-            Err(error) => self.fail(exchange.seq, error.to_string(), events),
+            Err(error) => self.fail(exchange.seq, error.into(), events),
         }
     }
 
-    fn fail(&mut self, seq: u16, detail: String, events: &mut Vec<MasterEvent>) {
+    fn fail(&mut self, seq: u16, failure: ExchangeFailure, events: &mut Vec<MasterEvent>) {
         self.exchange = None;
         self.stats.failures += 1;
-        self.last_failure = Some(detail.clone());
-        events.push(MasterEvent::ExchangeFailed { seq, detail });
+        self.last_failure = Some(failure.clone());
+        events.push(MasterEvent::ExchangeFailed { seq, failure });
     }
 
     /// 標本が交換の 4 回分の間隔と応答の待ち時間を合わせたより長く届いていないか。
@@ -1203,7 +1222,7 @@ mod tests {
             source.on_tick(mono(2_500_000)),
             [MasterEvent::ExchangeFailed {
                 seq,
-                detail: "Follow_Up が届きません".to_owned(),
+                failure: ExchangeFailure::FollowUpMissing,
             }]
         );
         // 次の Sync で次の交換を始められる
@@ -1216,7 +1235,7 @@ mod tests {
             source.on_tick(mono(4_000_000)),
             [MasterEvent::ExchangeFailed {
                 seq: next,
-                detail: "Delay_Resp が届きません".to_owned(),
+                failure: ExchangeFailure::DelayRespMissing,
             }]
         );
         assert_eq!(source.stats().failures, 2);

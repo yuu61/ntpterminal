@@ -1,7 +1,8 @@
 //! 直近の測定値の推移: 2 つの系列の小さい棒グラフ。
 //!
 //! - NTP: 成功した測定（`SyncSnapshot::last_sample`）のオフセットと遅延を 1 回ずつ貯める。情報欄の値は
-//!   クロックフィルタが選んだ標本なので、最新の棒と一致しないことがある。見出しに「測定値」と書いて区別する
+//!   クロックフィルタが選んだ標本なので、最新の棒と一致しないことがある。見出しに "samples"（測定値）と書いて
+//!   区別する
 //! - ptp4l の PHC: 読めた ptp4l の状態の、マスタとの差（offsetFromMaster）と経路の遅延を 1 回ずつ貯める。
 //!   PTP の同期の良さはこちらに出る（PC との差は、PC の時計の合わせ方で決まる）
 //! - 棒は [`big_digits`](super::big_digits) と同じく、背景色付きの空白と `▄` で描く。`▁▂▃` などの
@@ -123,16 +124,16 @@ pub(super) fn trends(history: &SampleHistory) -> Vec<Trend> {
     let seconds: Vec<TimeDelta> = history.values.iter().map(|&(_, second)| second).collect();
     match history.series {
         Series::Ntp => vec![
-            trend("オフセット", &firsts, format_offset_ms),
-            trend("遅延", &seconds, format_delay_ms),
+            trend("Offset", &firsts, format_offset_ms),
+            trend("Delay", &seconds, format_delay_ms),
         ],
         Series::Ptp4l => vec![
-            trend("マスタとの差", &firsts, format_nanos_signed),
-            trend("経路遅延", &seconds, format_nanos),
+            trend("Master offset", &firsts, format_nanos_signed),
+            trend("Path delay", &seconds, format_nanos),
         ],
         Series::PtpMaster => vec![
-            trend("PC との差", &firsts, format_nanos_signed),
-            trend("経路遅延", &seconds, format_nanos),
+            trend("PC offset", &firsts, format_nanos_signed),
+            trend("Path delay", &seconds, format_nanos),
         ],
     }
 }
@@ -201,7 +202,12 @@ pub(super) fn render(trends: &[Trend], area: Rect, y: u16, buf: &mut Buffer) {
     let bars_x = x.saturating_add(label_width(trends));
     let range_x = bars_x.saturating_add(BARS).saturating_add(RANGE_GAP);
     let count = trends.first().map_or(0, |trend| trend.levels.len());
-    put(buf, area, x, y, &format!("直近 {count} 回の測定値"));
+    let heading = if count == 1 {
+        "Last 1 sample".to_owned()
+    } else {
+        format!("Last {count} samples")
+    };
+    put(buf, area, x, y, &heading);
 
     let mut top = y.saturating_add(1);
     for trend in trends {
@@ -371,13 +377,13 @@ mod tests {
             history.observe(&phc_snapshot(updates, offset_ns));
         }
         let built = trends(&history);
-        assert_eq!(built[0].label, "マスタとの差");
+        assert_eq!(built[0].label, "Master offset");
         assert_eq!(
             (built[0].max.as_str(), built[0].min.as_str()),
             ("+30 ns", "-12 ns")
         );
         assert_eq!(built[0].levels.len(), 3, "同じ状態は 1 回だけ数える");
-        assert_eq!(built[1].label, "経路遅延");
+        assert_eq!(built[1].label, "Path delay");
         assert_eq!(built[1].max, "1234 ns");
     }
 
@@ -444,14 +450,14 @@ mod tests {
         let history = testing::history(&[(-978, 423), (-950, 400), (-1_020, 452)]);
         let built = trends(&history);
         let offset = &built[0];
-        assert_eq!(offset.label, "オフセット");
+        assert_eq!(offset.label, "Offset");
         assert_eq!(
             (offset.max.as_str(), offset.min.as_str()),
             ("-0.950 ms", "-1.020 ms")
         );
         assert_eq!(offset.levels, [3, 4, 1]);
         let delay = &built[1];
-        assert_eq!(delay.label, "遅延");
+        assert_eq!(delay.label, "Delay");
         assert_eq!(
             (delay.max.as_str(), delay.min.as_str()),
             ("0.452 ms", "0.400 ms")
@@ -477,7 +483,7 @@ mod tests {
     #[test]
     fn draws_bars_right_aligned_with_half_cells() {
         let built = [Trend {
-            label: "遅延",
+            label: "Delay",
             levels: vec![1, 2, 3, 4],
             max: "0.452 ms".into(),
             min: "0.400 ms".into(),
@@ -509,8 +515,8 @@ mod tests {
             }
             line
         };
-        assert!(text(0).starts_with("直近 4 回の測定値"));
-        assert!(text(1).starts_with("遅延"));
+        assert!(text(0).starts_with("Last 4 samples"));
+        assert!(text(1).starts_with("Delay"));
         assert!(text(1).trim_end().ends_with("0.452 ms"));
         assert!(text(2).trim_end().ends_with("0.400 ms"));
     }

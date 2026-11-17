@@ -1,7 +1,7 @@
 //! 画面の内容（[`ScreenModel`]）と描画。
 //!
 //! 内容の組み立て（[`build`]）と描画（`Widget for &ScreenModel`）を分け、どちらも
-//! 端末なしでテストできるようにしている。
+//! 端末なしでテストできるようにしている。文言は英語（[`text`] の先頭）。
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
@@ -9,6 +9,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Widget;
 
+use application::description::NtpTransportInfo;
 use application::snapshot::{ReceiverSnapshot, SyncSnapshot};
 use application::timestamping::{TimestampSource, TimestampingStatus};
 use domain::shared_kernel::{NtpTimestamp, PcTime, TimeDelta};
@@ -16,11 +17,8 @@ use domain::time_sync::SyncState;
 
 use super::big_digits::{self, BigText};
 use super::trend::{self, SampleHistory, Trend};
-use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, theme};
-use crate::format::{
-    DisplayZone, format_clock, format_date, format_delay_ms, format_offset_ms, state_label,
-    timestamping_label,
-};
+use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, text, theme};
+use crate::format::{DisplayZone, format_clock, format_delay_ms, format_offset_ms};
 
 /// 同期前の時計の表示。
 const CLOCK_PLACEHOLDER: &str = "--:--:--.---";
@@ -29,6 +27,8 @@ pub(super) const NO_VALUE: &str = "--";
 /// 状態の前に付ける印。
 /// 注意: `●` は East Asian Ambiguous。端末の「曖昧幅」が半角（既定）であることを前提にしている。
 const STATUS_MARK: &str = "●";
+/// 成功した回数と試みた回数（"687/687"）の行のラベル。時刻源によらず同じ。
+pub(super) const SUCCESS_LABEL: &str = "Success/Tries";
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct InfoRow {
@@ -43,7 +43,7 @@ pub(crate) struct ScreenModel {
     pub server: String,
     /// 大きい時計の文字列（"17:25:45.146"）
     pub clock: String,
-    /// "2026-11-15 (日)"。同期前は `None`
+    /// "2026-11-15 (Sun)"。同期前は `None`
     pub date: Option<String>,
     pub zone_label: String,
     pub status: String,
@@ -92,12 +92,9 @@ pub(super) fn build(
                 ),
             )
         }
-        TuiSource::Phc {
-            phc: description,
-            ports,
-        } => {
+        TuiSource::Phc { phc: info, ports } => {
             let snap = snapshot.and_then(SourceSnapshot::phc);
-            (phc::status(snap), phc::rows(snap, description, ports, now))
+            (phc::status(snap), phc::rows(snap, info, ports, now))
         }
         TuiSource::Ptp {
             transport,
@@ -117,7 +114,7 @@ pub(super) fn build(
             || CLOCK_PLACEHOLDER.to_owned(),
             |time| format_clock(time, &config.zone),
         ),
-        date: shown.map(|time| format_date(time, &config.zone)),
+        date: shown.map(|time| text::date(time, &config.zone)),
         zone_label: config.zone.label().to_owned(),
         status,
         status_color,
@@ -134,12 +131,13 @@ pub(super) fn build(
 /// NTP の状態の行の文言と色。
 fn ntp_status(snapshot: Option<&SyncSnapshot>) -> (String, Color) {
     let state = snapshot.map_or(SyncState::Unsynchronized, |snap| snap.state);
-    match state {
-        SyncState::Synchronized => (state_label(state).to_owned(), theme::GOOD),
-        SyncState::Unsynchronized => ("応答待ち（未同期）".to_owned(), theme::LABEL),
-        SyncState::Holdover => (state_label(state).to_owned(), theme::WARN),
-        SyncState::Denied => (state_label(state).to_owned(), theme::BAD),
-    }
+    let color = match state {
+        SyncState::Synchronized => theme::GOOD,
+        SyncState::Unsynchronized => theme::LABEL,
+        SyncState::Holdover => theme::WARN,
+        SyncState::Denied => theme::BAD,
+    };
+    (text::ntp_state(state).to_owned(), color)
 }
 
 /// NTP の情報欄。受信機の行（`show_receiver` のとき）は、基準時計に関わる「Ref ID」の後ろに置く。
@@ -147,7 +145,7 @@ fn info_rows(
     snapshot: Option<&SyncSnapshot>,
     show_receiver: bool,
     receiver: Option<&ReceiverSnapshot>,
-    transport: &str,
+    transport: &NtpTransportInfo,
     timestamping: &TimestampingStatus,
     zone: &DisplayZone,
     now: PcTime,
@@ -165,22 +163,22 @@ fn info_rows(
     let offset = selected.map(|sample| sample.offset().delta());
     let delay = selected.map(|sample| sample.delay().delta());
     let next_poll = match snapshot {
-        Some(snap) if snap.state == SyncState::Denied => Some("停止中".to_owned()),
+        Some(snap) if snap.state == SyncState::Denied => Some("Stopped".to_owned()),
         Some(snap) => snap
             .next_poll
             .and_then(|at| at.since(now).ok())
-            .map(|remaining| format!("{:.1} 秒後", remaining.max(TimeDelta::ZERO).as_secs_f64())),
+            .map(text::after),
         None => None,
     };
 
     let mut rows = vec![
         row(
-            "オフセット",
+            "Offset",
             offset.map(format_offset_ms),
             offset.map_or(theme::TEXT, tone),
         ),
         row(
-            "遅延",
+            "Delay",
             delay.map(format_delay_ms),
             delay.map_or(theme::TEXT, tone),
         ),
@@ -209,25 +207,29 @@ fn info_rows(
             theme::TEXT,
         ),
         row(
-            "サーバ時刻",
+            "Server time",
             last.map(|sample| format_clock(sample.server_transmit(), zone)),
             theme::TEXT,
         ),
         row(
-            "最終同期",
+            "Last sync",
             snapshot
                 .and_then(|snap| snap.last_success)
                 .and_then(|at| now.since(at).ok())
-                .map(|elapsed| format!("{:.1} 秒前", elapsed.max(TimeDelta::ZERO).as_secs_f64())),
+                .map(text::ago),
             theme::TEXT,
         ),
-        row("次回取得", next_poll, theme::TEXT),
+        row("Next poll", next_poll, theme::TEXT),
         row(
-            "成功/試行",
+            SUCCESS_LABEL,
             snapshot.map(|snap| format!("{}/{}", snap.stats.successes, snap.stats.attempts)),
             theme::TEXT,
         ),
-        row("送信方式", Some(transport.to_owned()), theme::LABEL),
+        row(
+            "Transport",
+            Some(text::ntp_transport(transport)),
+            theme::LABEL,
+        ),
         {
             let counts = timestamping.counts();
             // カーネルかハードウェアの時刻が、設定どおりに取れているときだけ「良好」の色にする
@@ -239,8 +241,8 @@ fn info_rows(
                 theme::LABEL
             };
             row(
-                "タイムスタンプ",
-                Some(timestamping_label(&counts).to_owned()),
+                "Timestamps",
+                Some(text::timestamping(&counts).to_owned()),
                 color,
             )
         },
@@ -413,20 +415,32 @@ fn render_info_rows(rows: &[InfoRow], area: Rect, mut y: u16, buf: &mut Buffer) 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::master::MasterTarget;
+    use crate::cli::phc::PhcTarget;
     use crate::format::display_width;
+    use crate::tui::{master_server_label, phc_server_label};
     use alloc::sync::Arc;
-    use application::acl::mib::MibProfile;
-    use application::snapshot::{MasterSnapshot, PhcSnapshot};
-    use core::net::SocketAddr;
-    use domain::ptp_clock::{
-        ClockIdentity, ClockQuality, LeapWarning, MasterState, MasterStats, MasterStatus, PhcState,
-        PhcStats, PortIdentity, PortState, PortStatus, PtpStatus, TimeProperties, TimeSourceKind,
-        Timescale,
+    use application::acl::mib::{MibError, MibProfile};
+    use application::description::{
+        HardwareTimestampInfo, NtpTransportKind, PhcInfo, PhcReadMethod, PtpTransportInfo,
     };
-    use domain::receiver::{ReceiverState, ReceiverStatus, SatelliteCounts};
-    use domain::shared_kernel::LocalStamp;
+    use application::port::TransportError;
+    use application::snapshot::{MasterSnapshot, PhcSnapshot};
+    use application::usecase::MonitorError;
+    use core::net::{Ipv4Addr, SocketAddr};
+    use domain::packet_crafting::MacAddr;
+    use domain::ptp_clock::{
+        ClockIdentity, ClockQuality, ExchangeFailure, LeapWarning, MasterState, MasterStats,
+        MasterStatus, PhcState, PhcStats, PortIdentity, PortState, PortStatus, PtpStatus,
+        TimeProperties, TimeSourceKind, Timescale,
+    };
+    use domain::receiver::{
+        AntennaState, Constellation, ConstellationCount, ReceiverState, ReceiverStatus,
+        SatelliteCounts,
+    };
+    use domain::shared_kernel::{LocalStamp, Timebase, TimebaseMismatch};
     use domain::time_sync::{
-        Anchor, ExchangeStats, LeapIndicator, ReferenceId, Sample, ServerInfo, Stratum,
+        Anchor, ExchangeStats, LeapIndicator, ReferenceId, Sample, SampleError, ServerInfo, Stratum,
     };
 
     /// 2026-11-15 17:25:37.923 JST
@@ -434,6 +448,13 @@ mod tests {
         let unix_nanos =
             (20_772i128 * 86_400 + 8 * 3600 + 25 * 60 + 37) * 1_000_000_000 + 923_000_000;
         NtpTimestamp::from_unix_nanos(unix_nanos)
+    }
+
+    fn udp() -> NtpTransportInfo {
+        NtpTransportInfo {
+            kind: NtpTransportKind::Udp,
+            hardware: None,
+        }
     }
 
     fn config(footer: Option<&str>) -> TuiConfig {
@@ -445,7 +466,7 @@ mod tests {
             trend: false,
             source: TuiSource::Ntp {
                 receiver: false,
-                transport: "UDP ソケット".into(),
+                transport: udp(),
                 timestamping: Arc::new(TimestampingStatus::new()),
             },
         }
@@ -559,7 +580,7 @@ mod tests {
             Some(shown),
             seven_seconds_later(),
         );
-        assert_eq!(model.status, "同期済み");
+        assert_eq!(model.status, "Synchronized");
         let value = |label: &str| {
             model
                 .rows
@@ -569,17 +590,17 @@ mod tests {
                 .value
                 .clone()
         };
-        assert_eq!(value("オフセット"), "-0.978 ms");
-        assert_eq!(value("遅延"), "0.423 ms");
+        assert_eq!(value("Offset"), "-0.978 ms");
+        assert_eq!(value("Delay"), "0.423 ms");
         assert_eq!(value("Stratum"), "1");
         assert_eq!(value("Ref ID"), "GNSS");
         assert_eq!(value("NTP version"), "4");
-        assert_eq!(value("最終同期"), "7.0 秒前");
-        assert_eq!(value("次回取得"), "9.0 秒後");
-        assert_eq!(value("成功/試行"), "687/687");
-        assert_eq!(value("送信方式"), "UDP ソケット");
-        assert_eq!(value("タイムスタンプ"), "ユーザ空間");
-        assert_eq!(model.date.as_deref(), Some("2026-11-15 (日)"));
+        assert_eq!(value("Last sync"), "7.0 s ago");
+        assert_eq!(value("Next poll"), "in 9.0 s");
+        assert_eq!(value(SUCCESS_LABEL), "687/687");
+        assert_eq!(value("Transport"), "UDP socket");
+        assert_eq!(value("Timestamps"), "User space");
+        assert_eq!(model.date.as_deref(), Some("2026-11-15 (Sun)"));
     }
 
     #[test]
@@ -598,11 +619,15 @@ mod tests {
             model
                 .rows
                 .iter()
-                .filter(|row| !matches!(row.label, "送信方式" | "タイムスタンプ"))
+                .filter(|row| !matches!(row.label, "Transport" | "Timestamps"))
                 .all(|row| row.value == NO_VALUE)
         );
         let lines = render_text(&model, 80, 24);
-        assert!(lines.iter().any(|line| line.contains("応答待ち（未同期）")));
+        assert!(
+            lines
+                .iter()
+                .any(|line| line.contains("Waiting for reply (unsynchronized)"))
+        );
     }
 
     #[test]
@@ -626,12 +651,12 @@ mod tests {
         for expected in [
             "N T P   C L O C K",
             "192.168.1.123",
-            "2026-11-15 (日)  JST",
-            "● 同期済み",
-            "オフセット",
+            "2026-11-15 (Sun)  JST",
+            "● Synchronized",
+            "Offset",
             "-0.978 ms",
             "687/687",
-            "直近 3 回の測定値",
+            "Last 3 samples",
             "-0.950 ms",
             "-1.020 ms",
             "0.452 ms",
@@ -642,7 +667,7 @@ mod tests {
         }
         // 120 桁では倍率 2（100 桁 × 5 行）で描かれる。推移を出しても時計は縮まない
         assert_eq!(lines.iter().filter(|line| line.contains('█')).count(), 5);
-        // 推移の棒は 2 系列 × 2 行で、右端に新しい値が来る（段: オフセット 3,4,1 / 遅延 2,1,4）
+        // 推移の棒は 2 系列 × 2 行で、右端に新しい値が来る（段: Offset 3,4,1 / Delay 2,1,4）
         let bar_rows: Vec<&String> = lines.iter().filter(|line| line.contains('#')).collect();
         assert_eq!(bar_rows.len(), 4);
         for (row, expected) in bar_rows.iter().zip([
@@ -658,7 +683,7 @@ mod tests {
         }
         // 最下部の一文は推移より下に出る
         let row_of = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
-        assert!(row_of("直近 3 回の測定値") < row_of("Sponsored by Example Inc."));
+        assert!(row_of("Last 3 samples") < row_of("Sponsored by Example Inc."));
     }
 
     #[test]
@@ -677,7 +702,7 @@ mod tests {
         );
         assert_eq!(model.trends, []);
         let text = render_text(&model, 300, 60).join("\n");
-        assert!(!text.contains("測定値"));
+        assert!(!text.contains("samples"));
     }
 
     #[test]
@@ -702,20 +727,22 @@ mod tests {
             Some(shown),
             now,
         );
-        // 300×30 は高さで倍率が決まる（推移を出すと倍率 4 → 2）。80×60 は推移が横に入らない。
+        // 300×30 は高さで倍率が決まる（推移を出すと倍率 4 → 2）。78×60 は推移（79 桁）が横に入らない。
         // 80×24 は時計が倍率 1 でぎりぎり。どれも推移を出さず、出さないときと同じ画面になる
-        for (width, height) in [(300, 30), (80, 60), (80, 24)] {
+        for (width, height) in [(300, 30), (78, 60), (80, 24)] {
             let lines = render_text(&with, width, height);
             assert_eq!(
                 lines,
                 render_text(&without, width, height),
                 "{width}×{height}"
             );
-            assert!(!lines.join("\n").contains("測定値"), "{width}×{height}");
+            assert!(!lines.join("\n").contains("samples"), "{width}×{height}");
         }
-        // 余裕があれば出す
-        let text = render_text(&with, 300, 60).join("\n");
-        assert!(text.contains("直近 3 回の測定値"));
+        // 余裕があれば出す（80 桁でも、高さがあれば入る）
+        for (width, height) in [(300, 60), (80, 60)] {
+            let text = render_text(&with, width, height).join("\n");
+            assert!(text.contains("Last 3 samples"), "{width}×{height}");
+        }
     }
 
     #[test]
@@ -783,7 +810,7 @@ mod tests {
         let with_receiver = TuiConfig {
             source: TuiSource::Ntp {
                 receiver: true,
-                transport: "UDP ソケット".into(),
+                transport: udp(),
                 timestamping: Arc::new(TimestampingStatus::new()),
             },
             ..config(Some("footer"))
@@ -798,7 +825,10 @@ mod tests {
         );
         let labels: Vec<&str> = model.rows.iter().map(|row| row.label).collect();
         let ref_id = labels.iter().position(|&label| label == "Ref ID").unwrap();
-        assert_eq!(labels[ref_id + 1..ref_id + 3], ["GNSS 受信機", "衛星"]);
+        assert_eq!(
+            labels[ref_id + 1..ref_id + 3],
+            ["GNSS receiver", "Satellites"]
+        );
 
         let lines = render_text(&model, 80, 24);
         // 目視確認用: cargo test -p ntpterminal-presentation receiver_rows_fit -- --nocapture
@@ -807,8 +837,8 @@ mod tests {
         assert!(lines.iter().any(|line| line.contains('█')));
         assert!(!lines.iter().any(|line| line.contains(&model.clock)));
         let text = lines.join("\n");
-        assert!(text.contains("Meinberg LTNG（gps180）: 同期（gpsSync）"));
-        assert!(text.contains("良好 5 / 可視 9"));
+        assert!(text.contains("Meinberg LTNG (gps180): Synchronized (gpsSync)"));
+        assert!(text.contains("good 5 / in view 9"));
         assert!(text.contains("footer"));
 
         // 既定（--snmp-community なし）では出さない
@@ -820,7 +850,7 @@ mod tests {
             Some(shown),
             now,
         );
-        assert!(!without.rows.iter().any(|row| row.label == "GNSS 受信機"));
+        assert!(!without.rows.iter().any(|row| row.label == "GNSS receiver"));
     }
 
     /// ptp4l の状態（ポート 1 つ）と、PHC の読み取りのスナップショット。
@@ -871,13 +901,28 @@ mod tests {
         }
     }
 
+    fn phc_target() -> PhcTarget {
+        PhcTarget {
+            socket: "/var/run/ptp4l".to_owned(),
+            domain: 0,
+            phc: PhcInfo {
+                path: "/dev/ptp0".to_owned(),
+                virtual_clock: false,
+                from_interface: false,
+                method: PhcReadMethod::Precise,
+            },
+            ports: vec![(1, "eno1".to_owned())],
+        }
+    }
+
     fn phc_config() -> TuiConfig {
+        let target = phc_target();
         TuiConfig {
             title: "PTP CLOCK".into(),
-            server_label: "/var/run/ptp4l（ドメイン 0）".into(),
+            server_label: phc_server_label(&target),
             source: TuiSource::Phc {
-                phc: "/dev/ptp0（同時読み取り）".into(),
-                ports: vec![(1, "eno1".to_owned())],
+                phc: target.phc,
+                ports: target.ports,
             },
             ..config(Some("footer"))
         }
@@ -896,7 +941,8 @@ mod tests {
             Some(shown),
             now,
         );
-        assert_eq!(model.status, "同期済み（SLAVE）");
+        assert_eq!(model.server, "/var/run/ptp4l (domain 0)");
+        assert_eq!(model.status, "Synchronized (SLAVE)");
         assert_eq!(model.status_color, theme::GOOD);
         let value = |label: &str| {
             model
@@ -906,14 +952,15 @@ mod tests {
                 .map(|row| row.value.clone())
                 .unwrap()
         };
-        assert_eq!(value("マスタとの差"), "-12 ns");
-        assert_eq!(value("経路遅延"), "1234 ns");
-        assert_eq!(value("グランドマスタ"), "ec4670.fffe.000001");
-        assert_eq!(value("Clock class"), "6（基準に同期）");
-        assert_eq!(value("UTC との差"), "37 秒");
-        assert_eq!(value("PC との差"), "-0.978 ms（PHC − PC）");
-        assert_eq!(value("ポート"), "eno1 SLAVE");
-        assert_eq!(value("成功/試行"), "120/120");
+        assert_eq!(value("Master offset"), "-12 ns");
+        assert_eq!(value("Path delay"), "1234 ns");
+        assert_eq!(value("Grandmaster"), "ec4670.fffe.000001");
+        assert_eq!(value("Clock class"), "6 (synced to reference)");
+        assert_eq!(value("UTC offset"), "37 s");
+        assert_eq!(value("PC offset"), "-0.978 ms (PHC - PC)");
+        assert_eq!(value("Ports"), "eno1 SLAVE");
+        assert_eq!(value("PHC"), "/dev/ptp0 (simultaneous read)");
+        assert_eq!(value(SUCCESS_LABEL), "120/120");
 
         let lines = render_text(&model, 80, 24);
         // 目視確認用: cargo test -p ntpterminal-presentation phc_rows_fit -- --nocapture
@@ -935,7 +982,7 @@ mod tests {
             seven_seconds_later(),
         );
         assert_eq!(model.clock, CLOCK_PLACEHOLDER);
-        assert_eq!(model.status, "マスタを探しています（LISTENING）");
+        assert_eq!(model.status, "Looking for master (LISTENING)");
 
         let mut lost = phc_snapshot(PhcState::Holdover, PortState::Slave);
         lost.status_error = Some("ptp4l から CURRENT_DATA_SET の応答がありません".to_owned());
@@ -947,7 +994,7 @@ mod tests {
             None,
             seven_seconds_later(),
         );
-        assert_eq!(holdover.status, "自走中（ptp4l の応答なし）");
+        assert_eq!(holdover.status, "Holdover (no response from ptp4l)");
         assert_eq!(holdover.status_color, theme::WARN);
 
         let waiting = build(
@@ -958,7 +1005,7 @@ mod tests {
             None,
             seven_seconds_later(),
         );
-        assert_eq!(waiting.status, "ptp4l の応答待ち");
+        assert_eq!(waiting.status, "Waiting for ptp4l");
         assert!(waiting.rows.iter().any(|row| row.value == NO_VALUE));
     }
 
@@ -1021,11 +1068,20 @@ mod tests {
     }
 
     fn master_config() -> TuiConfig {
+        let target = MasterTarget {
+            domain: 0,
+            transport: PtpTransportInfo {
+                interface: Some("nic0".to_owned()),
+                local: Ipv4Addr::new(192, 168, 10, 200),
+                event_port: 319,
+                unicast_to: None,
+            },
+        };
         TuiConfig {
             title: "PTP CLOCK".into(),
-            server_label: "PTP のマスタ（ドメイン 0）".into(),
+            server_label: master_server_label(&target),
             source: TuiSource::Ptp {
-                transport: "nic0 192.168.10.200・UDP 319/320・マルチキャスト".into(),
+                transport: target.transport,
                 timestamping: Arc::new(TimestampingStatus::new()),
             },
             ..config(Some("footer"))
@@ -1045,7 +1101,8 @@ mod tests {
             Some(shown),
             now,
         );
-        assert_eq!(model.status, "同期済み");
+        assert_eq!(model.server, "PTP master (domain 0)");
+        assert_eq!(model.status, "Synchronized");
         assert_eq!(model.status_color, theme::GOOD);
         let value = |label: &str| {
             model
@@ -1055,36 +1112,27 @@ mod tests {
                 .map(|row| row.value.clone())
                 .unwrap()
         };
-        assert_eq!(value("PC との差"), "-0.978 ms（マスタ − PC）");
+        assert_eq!(value("PC offset"), "-0.978 ms (master - PC)");
         // 往復 0.423ms の片道
-        assert_eq!(value("経路遅延"), "0.211 ms");
-        assert_eq!(value("マスタ"), "001b21.fffe.123456-1（192.168.10.50）");
-        assert_eq!(value("Clock class"), "6（基準に同期）");
+        assert_eq!(value("Path delay"), "0.211 ms");
+        assert_eq!(value("Master"), "001b21.fffe.123456-1 (192.168.10.50)");
+        assert_eq!(value("Clock class"), "6 (synced to reference)");
         assert_eq!(
-            value("間隔"),
-            "Sync 1 秒（two-step）・Delay_Req 1 秒（マスタの最小間隔）"
+            value("Intervals"),
+            "Sync 1 s (two-step), Delay_Req 1 s (master minimum)"
         );
-        assert_eq!(value("成功/試行"), "118/120");
+        assert_eq!(value(SUCCESS_LABEL), "118/120");
+        assert_eq!(
+            value("Transport"),
+            "nic0 192.168.10.200, UDP 319/320, multicast"
+        );
         assert_eq!(model.rows.len(), 13);
 
         let lines = render_text(&model, 80, 24);
         // 目視確認用: cargo test -p ntpterminal-presentation master_rows_fit -- --nocapture
-        println!(
-            "{}",
-            lines.join(
-                "
-"
-            )
-        );
+        println!("{}", lines.join("\n"));
         assert!(lines.iter().any(|line| line.contains('█')));
-        assert!(
-            lines
-                .join(
-                    "
-"
-                )
-                .contains("footer")
-        );
+        assert!(lines.join("\n").contains("footer"));
     }
 
     #[test]
@@ -1101,10 +1149,10 @@ mod tests {
             seven_seconds_later(),
         );
         assert_eq!(model.clock, CLOCK_PLACEHOLDER);
-        assert_eq!(model.status, "マスタを探しています（ドメイン 0）");
+        assert_eq!(model.status, "Looking for master (domain 0)");
 
         let mut silent = master_snapshot(MasterState::Uncalibrated);
-        silent.last_failure = Some("Delay_Resp が届きません".to_owned());
+        silent.last_failure = Some(ExchangeFailure::DelayRespMissing);
         let measuring = build(
             &master_config(),
             Some(&SourceSnapshot::Ptp(Box::new(silent))),
@@ -1113,10 +1161,7 @@ mod tests {
             None,
             seven_seconds_later(),
         );
-        assert_eq!(
-            measuring.status,
-            "マスタの時刻を測っています（Delay_Resp が届きません）"
-        );
+        assert_eq!(measuring.status, "Measuring master time (no Delay_Resp)");
 
         let mut lost = master_snapshot(MasterState::Holdover);
         lost.status = None;
@@ -1128,8 +1173,325 @@ mod tests {
             None,
             seven_seconds_later(),
         );
-        assert_eq!(holdover.status, "自走中（マスタを見失いました）");
+        assert_eq!(holdover.status, "Holdover (master lost)");
         assert_eq!(holdover.status_color, theme::WARN);
+    }
+
+    /// 画面の文字が ASCII だけか（状態の印 `●`・大きい時計と推移の棒の半ブロック `▀` `▄`・`render_text` が
+    /// 時計の背景を表す `█` を除く）。
+    /// 描いた結果だけでなく、画面の内容（行の値など。狭い端末で切れて見えなくなるものも）も確かめる。
+    fn assert_ascii(model: &ScreenModel) {
+        let mut texts = vec![
+            model.title.clone(),
+            model.server.clone(),
+            model.clock.clone(),
+            model.zone_label.clone(),
+            model.status.clone(),
+        ];
+        texts.extend(model.date.clone());
+        texts.extend(model.footer.clone());
+        for row in &model.rows {
+            texts.push(row.label.to_owned());
+            texts.push(row.value.clone());
+        }
+        for trend in &model.trends {
+            texts.push(trend.label.to_owned());
+            texts.push(trend.max.clone());
+            texts.push(trend.min.clone());
+        }
+        for text in &texts {
+            assert!(text.is_ascii(), "{text:?}");
+        }
+        let screen = render_text(model, 200, 60).join("\n");
+        assert!(
+            screen
+                .chars()
+                .all(|ch| ch.is_ascii() || matches!(ch, '●' | '▀' | '▄' | '█')),
+            "{screen}"
+        );
+    }
+
+    /// 受信機の監視のスナップショットの、ありうる形（応答前・取れた・失敗の種類ごと）。
+    fn receiver_variants(now: PcTime) -> Vec<Option<ReceiverSnapshot>> {
+        let receiver_status = |antenna| ReceiverStatus {
+            name: Some("gps180".to_owned()),
+            state: Some(ReceiverState::Acquiring),
+            state_detail: Some("gpsSync".to_owned()),
+            antenna: Some(antenna),
+            holdover: Some(true),
+            satellites: SatelliteCounts {
+                good: Some(5),
+                in_view: Some(9),
+                expected: Some(11),
+                tracking: Some(3),
+            },
+            constellations: vec![
+                ConstellationCount {
+                    constellation: Constellation::Gps,
+                    count: 2,
+                },
+                ConstellationCount {
+                    constellation: Constellation::Other("IRNSS".to_owned()),
+                    count: 1,
+                },
+            ],
+        };
+        let read = |status: ReceiverStatus| ReceiverSnapshot {
+            profile: Some(MibProfile::MicrochipS650),
+            status: Some(status),
+            last_success: Some(now),
+            ..ReceiverSnapshot::default()
+        };
+        let mut variants = vec![
+            None,
+            Some(ReceiverSnapshot::default()),
+            Some(read(ReceiverStatus::default())),
+        ];
+        for antenna in [
+            AntennaState::Connected,
+            AntennaState::Disconnected,
+            AntennaState::ShortCircuit,
+            AntennaState::Faulty,
+        ] {
+            variants.push(Some(read(receiver_status(antenna))));
+        }
+        for error in [
+            MonitorError::Transport(TransportError::Unreachable(
+                "Connection refused (os error 111)".to_owned(),
+            )),
+            MonitorError::Transport(TransportError::Io("Broken pipe (os error 32)".to_owned())),
+            MonitorError::Timeout,
+            MonitorError::ErrorStatus {
+                status: 2,
+                index: 1,
+            },
+            MonitorError::UnknownMib,
+            MonitorError::Mib(MibError::NoValues(MibProfile::MeinbergOs)),
+            MonitorError::Stopped,
+        ] {
+            let mut failed = read(receiver_status(AntennaState::Connected));
+            failed.last_error = Some(error);
+            variants.push(Some(failed.clone()));
+            failed.last_success = None;
+            variants.push(Some(failed));
+        }
+        variants
+    }
+
+    /// NTP: 送信方式・同期の状態・受信機の状態（SNMP のエラーを含む）ごとに、英語（ASCII）だけで描く。
+    #[test]
+    fn ntp_screens_are_ascii() {
+        let now = seven_seconds_later();
+        let shown = synced_snapshot().anchor.unwrap().project(now).ok();
+        let transports = [
+            udp(),
+            NtpTransportInfo {
+                kind: NtpTransportKind::RawIp,
+                hardware: Some(HardwareTimestampInfo {
+                    device: "nic0".to_owned(),
+                    enabled_temporarily: false,
+                }),
+            },
+            NtpTransportInfo {
+                kind: NtpTransportKind::Link {
+                    interface: "eth0".to_owned(),
+                    destination: MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+                },
+                hardware: Some(HardwareTimestampInfo {
+                    device: "eth0".to_owned(),
+                    enabled_temporarily: true,
+                }),
+            },
+        ];
+        let mut snapshots = vec![None];
+        for state in [
+            SyncState::Unsynchronized,
+            SyncState::Synchronized,
+            SyncState::Holdover,
+            SyncState::Denied,
+        ] {
+            let mut snapshot = synced_snapshot();
+            snapshot.state = state;
+            snapshots.push(Some(SourceSnapshot::Ntp(Box::new(snapshot))));
+        }
+        let receivers = receiver_variants(now);
+        for transport in transports {
+            let ntp = with_trend(TuiConfig {
+                source: TuiSource::Ntp {
+                    receiver: true,
+                    transport,
+                    timestamping: Arc::new(TimestampingStatus::new()),
+                },
+                ..config(Some("footer"))
+            });
+            for snapshot in &snapshots {
+                for receiver in &receivers {
+                    assert_ascii(&build(
+                        &ntp,
+                        snapshot.as_ref(),
+                        receiver.as_ref(),
+                        &recent_history(),
+                        shown,
+                        now,
+                    ));
+                }
+            }
+        }
+    }
+
+    /// ptp4l の PHC: PHC の読み方・状態・ポートの状態ごとに、英語（ASCII）だけで描く。
+    /// ptp4l の問い合わせの失敗の説明（日本語）は画面に出さない。
+    #[test]
+    fn phc_screens_are_ascii() {
+        let now = seven_seconds_later();
+        let shown = synced_snapshot().anchor.unwrap().project(now).ok();
+        for (virtual_clock, from_interface, method) in [
+            (false, false, PhcReadMethod::Precise),
+            (true, false, PhcReadMethod::Extended),
+            (false, true, PhcReadMethod::Basic),
+        ] {
+            let mut target = phc_target();
+            target.phc = PhcInfo {
+                virtual_clock,
+                from_interface,
+                method,
+                ..target.phc
+            };
+            let phc = with_trend(TuiConfig {
+                server_label: phc_server_label(&target),
+                source: TuiSource::Phc {
+                    phc: target.phc,
+                    ports: target.ports,
+                },
+                ..phc_config()
+            });
+            assert_ascii(&build(&phc, None, None, &recent_history(), None, now));
+            for state in [
+                PhcState::Starting,
+                PhcState::Acquiring,
+                PhcState::Synchronized,
+                PhcState::Master,
+                PhcState::Holdover,
+                PhcState::Faulty,
+            ] {
+                for port_state in [
+                    PortState::Slave,
+                    PortState::Uncalibrated,
+                    PortState::Unknown(9),
+                ] {
+                    for error in [
+                        None,
+                        Some("ptp4l から CURRENT_DATA_SET の応答がありません".to_owned()),
+                    ] {
+                        let mut snapshot = phc_snapshot(state, port_state);
+                        snapshot.status_error = error;
+                        if let Some(status) = snapshot.status.as_mut() {
+                            // ポート番号 2 はインターフェース名が分からない
+                            status.ports.push(PortStatus {
+                                number: 2,
+                                state: port_state,
+                            });
+                            status.time.timescale = Timescale::Arbitrary;
+                            status.time.leap = LeapWarning::Insert;
+                            status.time.time_source = TimeSourceKind::Unknown(0x42);
+                        }
+                        let source = SourceSnapshot::Phc(Box::new(snapshot));
+                        let mut history = SampleHistory::default();
+                        history.observe(&source);
+                        assert_ascii(&build(&phc, Some(&source), None, &history, shown, now));
+                    }
+                }
+            }
+        }
+    }
+
+    /// PTP のマスタ: 送受信の口・状態・交換の失敗の理由・受信の失敗ごとに、英語（ASCII）だけで描く。
+    /// 送受信の口のエラーの説明（日本語）は画面に出さない。
+    #[test]
+    fn master_screens_are_ascii() {
+        let now = seven_seconds_later();
+        let shown = synced_snapshot().anchor.unwrap().project(now).ok();
+        let failures = [
+            None,
+            Some(ExchangeFailure::RequestNotSent),
+            Some(ExchangeFailure::FollowUpMissing),
+            Some(ExchangeFailure::DelayRespMissing),
+            Some(ExchangeFailure::SendFailed(
+                "通信エラー: Network is unreachable (os error 101)".to_owned(),
+            )),
+            Some(ExchangeFailure::InvalidSample(
+                SampleError::TimebaseMismatch(TimebaseMismatch {
+                    left: Timebase::Monotonic,
+                    right: Timebase::KernelRealtime,
+                }),
+            )),
+            Some(ExchangeFailure::InvalidSample(
+                SampleError::ServerTimeReversed,
+            )),
+            Some(ExchangeFailure::InvalidSample(
+                SampleError::LocalTimeReversed,
+            )),
+        ];
+        for unicast_to in [None, Some(SocketAddr::from(([192, 168, 10, 50], 319)))] {
+            let target = MasterTarget {
+                domain: 3,
+                transport: PtpTransportInfo {
+                    interface: None,
+                    local: Ipv4Addr::new(192, 168, 10, 200),
+                    event_port: 319,
+                    unicast_to,
+                },
+            };
+            let master = with_trend(TuiConfig {
+                server_label: master_server_label(&target),
+                source: TuiSource::Ptp {
+                    transport: target.transport,
+                    timestamping: Arc::new(TimestampingStatus::new()),
+                },
+                ..master_config()
+            });
+            assert_ascii(&build(&master, None, None, &recent_history(), None, now));
+            for state in [
+                MasterState::Listening,
+                MasterState::Uncalibrated,
+                MasterState::Synchronized,
+                MasterState::Holdover,
+            ] {
+                for failure in &failures {
+                    for receive_error in [None, Some("受信のスレッドが止まりました".to_owned())]
+                    {
+                        for with_status in [true, false] {
+                            let mut snapshot = master_snapshot(state);
+                            snapshot.last_failure.clone_from(failure);
+                            snapshot.receive_error.clone_from(&receive_error);
+                            snapshot.master_min_interval = None;
+                            if with_status {
+                                if let Some(status) = snapshot.status.as_mut() {
+                                    status.two_step = Some(false);
+                                    status.time.utc_offset_valid = false;
+                                    status.time.leap = LeapWarning::Delete;
+                                    status.time.time_source = TimeSourceKind::HandSet;
+                                    status.grandmaster_quality.class = 7;
+                                }
+                            } else {
+                                snapshot.status = None;
+                            }
+                            let source = SourceSnapshot::Ptp(Box::new(snapshot));
+                            let mut history = SampleHistory::default();
+                            history.observe(&source);
+                            assert_ascii(&build(
+                                &master,
+                                Some(&source),
+                                None,
+                                &history,
+                                shown,
+                                now,
+                            ));
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

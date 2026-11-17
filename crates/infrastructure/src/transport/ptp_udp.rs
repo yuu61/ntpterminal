@@ -28,6 +28,7 @@ use std::net::UdpSocket;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::thread::{self, JoinHandle};
 
+use application::description::PtpTransportInfo;
 use application::port::{ClockPort, PtpInbound, PtpPort, TransportError};
 use application::timestamping::{TimestampSource, TimestampingStatus};
 use domain::ptp_clock::EventStamp;
@@ -88,8 +89,8 @@ pub struct PtpUdpOptions {
 /// 開いた送受信の口。
 pub struct OpenedPtp {
     pub port: PtpUdp,
-    /// 画面に出す説明（"nic0 192.168.10.200・UDP 319/320・マルチキャスト" など）
-    pub description: String,
+    /// 開いたもの（インターフェース・自分のアドレス・ポート・`Delay_Req` の宛先）
+    pub info: PtpTransportInfo,
     /// 設定した方式で取れる時刻の出どころ（カーネルの時刻を使わなければ `User`）
     pub precise_source: TimestampSource,
     /// `Delay_Req` をユニキャストで送るか
@@ -99,7 +100,7 @@ pub struct OpenedPtp {
 impl fmt::Debug for OpenedPtp {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("OpenedPtp")
-            .field("description", &self.description)
+            .field("info", &self.info)
             .field("precise_source", &self.precise_source)
             .field("unicast", &self.unicast)
             .finish_non_exhaustive()
@@ -177,7 +178,7 @@ pub fn open_ptp(
             }
         },
     );
-    let description = describe(
+    let info = describe(
         options.interface.as_ref(),
         local,
         options.event_port,
@@ -187,7 +188,7 @@ pub fn open_ptp(
     let port = PtpUdp::start(event, general, destination, clock, status, kernel)?;
     Ok(OpenedPtp {
         port,
-        description,
+        info,
         precise_source: if kernel {
             TimestampSource::Kernel
         } else {
@@ -197,27 +198,23 @@ pub fn open_ptp(
     })
 }
 
-/// 画面に出す説明。タイムスタンプの方式は含めない（実際に取れた方式は取得状況として別に出す）。
+/// 表示に渡す説明。タイムスタンプの方式は含めない（実際に取れた方式は取得状況として別に出す）。
 fn describe(
     interface: Option<&PtpInterface>,
     local: Ipv4Addr,
     event_port: u16,
     destination: SocketAddr,
     unicast: bool,
-) -> String {
-    let name = match interface.cloned() {
-        Some(PtpInterface::Name(name)) => format!("{name} {local}"),
-        Some(PtpInterface::Address(_)) | None => local.to_string(),
-    };
-    let mode = if unicast {
-        format!("Delay_Req は {destination} へ")
-    } else {
-        "マルチキャスト".to_owned()
-    };
-    format!(
-        "{name}・UDP {event_port}/{}・{mode}",
-        event_port.saturating_add(1)
-    )
+) -> PtpTransportInfo {
+    PtpTransportInfo {
+        interface: match interface.cloned() {
+            Some(PtpInterface::Name(name)) => Some(name),
+            Some(PtpInterface::Address(_)) | None => None,
+        },
+        local,
+        event_port,
+        unicast_to: unicast.then_some(destination),
+    }
 }
 
 /// カーネルのタイムスタンプを使うか（使えない方式ならエラー）。`Auto` は「使えれば使う」。
@@ -617,12 +614,29 @@ mod tests {
                 group,
                 false
             ),
-            "nic0 192.168.10.200・UDP 319/320・マルチキャスト"
+            PtpTransportInfo {
+                interface: Some("nic0".to_owned()),
+                local,
+                event_port: 319,
+                unicast_to: None,
+            }
         );
+        // アドレスで指定したインターフェースは、自分のアドレスと同じなので名前として出さない
         let master = SocketAddr::from(([192, 168, 10, 50], 319));
         assert_eq!(
-            describe(None, local, 319, master, true),
-            "192.168.10.200・UDP 319/320・Delay_Req は 192.168.10.50:319 へ"
+            describe(
+                Some(&PtpInterface::Address(local)),
+                local,
+                319,
+                master,
+                true
+            ),
+            PtpTransportInfo {
+                interface: None,
+                local,
+                event_port: 319,
+                unicast_to: Some(master),
+            }
         );
     }
 }

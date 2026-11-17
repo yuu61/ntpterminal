@@ -17,6 +17,7 @@ use std::io::{self, ErrorKind, Read as _};
 use std::net::UdpSocket;
 use std::time::Instant;
 
+use application::description::HardwareTimestampInfo;
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
 use application::timestamping::TimestampingStatus;
 use domain::packet_crafting::{HeaderTemplate, decode_ipv4_udp, encode_ipv4_udp};
@@ -110,7 +111,7 @@ impl RawIpTransport {
     }
 
     /// NIC のハードウェアのタイムスタンプを使う（NIC で無効なら有効にし、drop で戻す）。
-    /// 画面に出す説明（"nic0 の HW 時刻" など）を返す。
+    /// 使う NIC を返す。
     ///
     /// # Errors
     ///
@@ -118,16 +119,16 @@ impl RawIpTransport {
     pub fn enable_hardware_timestamps(
         &mut self,
         status: Arc<TimestampingStatus>,
-    ) -> io::Result<String> {
+    ) -> io::Result<HardwareTimestampInfo> {
         let hardware = HardwareClock::prepare((*self.local.ip()).into())?;
-        let description = hardware.description();
+        let info = hardware.info();
         self.kernel = Some(KernelTimestamper::enable_hardware(
             &self.recv_socket,
             &self.send_socket,
             status,
             hardware,
         )?);
-        Ok(description)
+        Ok(info)
     }
 
     /// 送信元（IP ヘッダに入れているアドレスとポート）。

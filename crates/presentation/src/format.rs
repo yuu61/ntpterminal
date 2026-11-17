@@ -1,7 +1,11 @@
-//! 表示用の整形（日時・時間差・状態・文字幅）。ptp4l が合わせる PHC の表示用のものは [`ptp`]。
+//! 表示用の整形（日時・時間差・状態・文字幅）。PTP の時計の表示用のものは [`ptp`]。
+//!
+//! 文言は CLI（`once`・`stats`）のもので、日本語。TUI の文言（英語）は `tui::text` にあり、数値の整形
+//! （[`format_offset_ms`] など）と日時の計算（[`to_civil`]）だけをここから使う。
 
 pub mod ptp;
 
+use application::description::{NtpTransportInfo, NtpTransportKind};
 use application::timestamping::{TimestampSource, TimestampingCounts};
 use domain::shared_kernel::{NtpTimestamp, TimeDelta};
 use domain::time_sync::{LeapIndicator, SyncState};
@@ -176,16 +180,6 @@ pub fn format_clock(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
     )
 }
 
-/// 日付だけ: "2026-11-15 (日)"
-#[must_use]
-pub fn format_date(timestamp: NtpTimestamp, zone: &DisplayZone) -> String {
-    let civil = to_civil(timestamp, zone.offset_secs());
-    format!(
-        "{:04}-{:02}-{:02} ({})",
-        civil.year, civil.month, civil.day, WEEKDAYS_JA[civil.weekday as usize]
-    )
-}
-
 /// "2026-11-16T08:25:37.923456789Z"（UTC。JSON 用）
 #[must_use]
 pub fn format_rfc3339_utc(timestamp: NtpTimestamp) -> String {
@@ -250,26 +244,85 @@ pub const fn leap_key(leap: LeapIndicator) -> &'static str {
     }
 }
 
+/// タイムスタンプの出どころ（直近の受信）の要約。設定した出どころの時刻が取れていないことを隠さない。
+///
+/// どれにあたるかの判断を CLI と TUI で同じにするためのもの。文言はそれぞれが決める（CLI は
+/// [`timestamping_label`]）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TimestampingSummary {
+    /// ユーザ空間の時刻を使う設定
+    User,
+    /// ハードウェアの時刻を使う設定で、まだ受信がない
+    HardwareWaiting,
+    /// カーネルの時刻を使う設定で、まだ受信がない
+    KernelWaiting,
+    Hardware,
+    /// ハードウェアの時刻を使う設定なのに、カーネルの時刻になった
+    KernelInsteadOfHardware,
+    Kernel,
+    /// カーネル（とハードウェア）の時刻を使う設定なのに、ユーザ空間の時刻になった
+    UserInsteadOfKernel,
+}
+
+impl TimestampingSummary {
+    #[must_use]
+    pub const fn of(counts: &TimestampingCounts) -> Self {
+        if !counts.kernel_enabled {
+            return Self::User;
+        }
+        if counts.samples() == 0 {
+            return if counts.hardware_enabled {
+                Self::HardwareWaiting
+            } else {
+                Self::KernelWaiting
+            };
+        }
+        match counts.last_source {
+            TimestampSource::Hardware => Self::Hardware,
+            TimestampSource::Kernel if counts.hardware_enabled => Self::KernelInsteadOfHardware,
+            TimestampSource::Kernel => Self::Kernel,
+            TimestampSource::User => Self::UserInsteadOfKernel,
+        }
+    }
+}
+
 /// タイムスタンプの出どころ（直近の受信）。設定した出どころの時刻が取れていないことを隠さない。
 #[must_use]
 pub const fn timestamping_label(counts: &TimestampingCounts) -> &'static str {
-    if !counts.kernel_enabled {
-        return "ユーザ空間";
+    match TimestampingSummary::of(counts) {
+        TimestampingSummary::User => "ユーザ空間",
+        TimestampingSummary::HardwareWaiting => "ハードウェア（応答待ち）",
+        TimestampingSummary::KernelWaiting => "カーネル（応答待ち）",
+        TimestampingSummary::Hardware => "ハードウェア",
+        TimestampingSummary::KernelInsteadOfHardware => "カーネル（ハードウェアの時刻が取れない）",
+        TimestampingSummary::Kernel => "カーネル",
+        TimestampingSummary::UserInsteadOfKernel => "ユーザ空間（カーネルの時刻が取れない）",
     }
-    if counts.samples() == 0 {
-        return if counts.hardware_enabled {
-            "ハードウェア（応答待ち）"
-        } else {
-            "カーネル（応答待ち）"
-        };
-    }
-    match counts.last_source {
-        TimestampSource::Hardware => "ハードウェア",
-        TimestampSource::Kernel if counts.hardware_enabled => {
-            "カーネル（ハードウェアの時刻が取れない）"
+}
+
+/// 送信方式の説明: "UDP ソケット"・"link（eth0 → 00:11:22:33:44:55）"。
+/// ハードウェアのタイムスタンプを使うときは、使う NIC も足す（"UDP ソケット・nic0 の HW 時刻"。こちらで
+/// 有効にしたときは "（一時的に有効化）" を添える）。
+#[must_use]
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "インターフェースの名前（String）を借りるには、参照のまま照合するしかない（ref は ref_patterns で禁止）"
+)]
+pub fn transport_label(info: &NtpTransportInfo) -> String {
+    let base = match &info.kind {
+        NtpTransportKind::Udp => "UDP ソケット".to_owned(),
+        NtpTransportKind::RawIp => "raw-ip（IP / UDP ヘッダを自作）".to_owned(),
+        NtpTransportKind::Link {
+            interface,
+            destination,
+        } => format!("link（{interface} → {destination}）"),
+    };
+    match info.hardware.as_ref() {
+        None => base,
+        Some(nic) if nic.enabled_temporarily => {
+            format!("{base}・{} の HW 時刻（一時的に有効化）", nic.device)
         }
-        TimestampSource::Kernel => "カーネル",
-        TimestampSource::User => "ユーザ空間（カーネルの時刻が取れない）",
+        Some(nic) => format!("{base}・{} の HW 時刻", nic.device),
     }
 }
 
@@ -327,6 +380,8 @@ fn char_width(ch: char) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use application::description::HardwareTimestampInfo;
+    use domain::packet_crafting::MacAddr;
 
     fn unix_secs(secs: i64) -> NtpTimestamp {
         NtpTimestamp::from_unix_nanos(i128::from(secs) * NANOS_PER_SEC)
@@ -376,10 +431,6 @@ mod tests {
             "2026-11-15T08:25:45.146000000Z"
         );
         assert_eq!(format_clock(timestamp, &DisplayZone::jst()), "17:25:45.146");
-        assert_eq!(
-            format_date(timestamp, &DisplayZone::jst()),
-            "2026-11-15 (日)"
-        );
     }
 
     #[test]
@@ -469,6 +520,40 @@ mod tests {
         assert_eq!(
             timestamping_label(&user_fallback),
             "ユーザ空間（カーネルの時刻が取れない）"
+        );
+    }
+
+    #[test]
+    fn transport_label_names_the_link_and_the_hardware_clock() {
+        let udp = NtpTransportInfo {
+            kind: NtpTransportKind::Udp,
+            hardware: None,
+        };
+        assert_eq!(transport_label(&udp), "UDP ソケット");
+        let link = NtpTransportInfo {
+            kind: NtpTransportKind::Link {
+                interface: "eth0".to_owned(),
+                destination: MacAddr([0x00, 0x11, 0x22, 0x33, 0x44, 0x55]),
+            },
+            hardware: Some(HardwareTimestampInfo {
+                device: "eth0".to_owned(),
+                enabled_temporarily: true,
+            }),
+        };
+        assert_eq!(
+            transport_label(&link),
+            "link（eth0 → 00:11:22:33:44:55）・eth0 の HW 時刻（一時的に有効化）"
+        );
+        let raw_ip = NtpTransportInfo {
+            kind: NtpTransportKind::RawIp,
+            hardware: Some(HardwareTimestampInfo {
+                device: "nic0".to_owned(),
+                enabled_temporarily: false,
+            }),
+        };
+        assert_eq!(
+            transport_label(&raw_ip),
+            "raw-ip（IP / UDP ヘッダを自作）・nic0 の HW 時刻"
         );
     }
 

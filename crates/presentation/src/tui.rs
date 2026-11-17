@@ -1,5 +1,7 @@
 //! TUI: 大きい時計・情報欄・測定値の推移。
 //!
+//! 画面の文言は英語（`text` の先頭）。CLI の文言（日本語）とは別に持つ。
+//!
 //! 同期は別スレッドの `SyncService`（NTP）か `PhcService`（ptp4l が合わせる PHC）か `PtpSlaveService`（PTP の
 //! マスタにスレーブとして問い合わせる）が行う。ここではチャネルで届く
 //! [`SourceSnapshot`] を受け取り、毎フレーム描き直すだけで、集約には触らない（推移のグラフ用に、届いた測定値を
@@ -14,15 +16,18 @@ mod phc;
 mod receiver;
 mod screen;
 mod snapshot_sender;
+mod text;
 mod theme;
 mod trend;
 
 pub use app::run;
 pub use receiver::mib_label;
 pub use snapshot_sender::{MasterSnapshotSender, PhcSnapshotSender, SnapshotSender};
+pub use text::{master_server_label, phc_server_label};
 
 use alloc::sync::Arc;
 
+use application::description::{NtpTransportInfo, PhcInfo, PtpTransportInfo};
 use application::snapshot::{MasterSnapshot, PhcSnapshot, SyncSnapshot};
 use application::timestamping::TimestampingStatus;
 use domain::time_sync::Anchor;
@@ -86,22 +91,22 @@ pub enum TuiSource {
     Ntp {
         /// GNSS 受信機の行を出すか（SNMP で受信機を読むとき）
         receiver: bool,
-        /// 送信方式の表示名（"UDP ソケット" / "raw-ip（…）"）
-        transport: String,
+        /// 送受信の口
+        transport: NtpTransportInfo,
         /// タイムスタンプの取得状況（送受信のスレッドが更新する）
         timestamping: Arc<TimestampingStatus>,
     },
     /// ptp4l が合わせる PHC
     Phc {
-        /// PHC の説明（"/dev/ptp0（同時読み取り）"）
-        phc: String,
+        /// 開いた PHC
+        phc: PhcInfo,
         /// PHC を使う ptp4l のポートの番号とインターフェース名
         ports: Vec<(u16, String)>,
     },
     /// PTP のスレーブとして問い合わせるマスタ
     Ptp {
-        /// 送受信の説明（"nic0 192.168.10.200・UDP 319/320・マルチキャスト"）
-        transport: String,
+        /// 送受信の口
+        transport: PtpTransportInfo,
         /// タイムスタンプの取得状況（送受信のスレッドが更新する）
         timestamping: Arc<TimestampingStatus>,
     },
@@ -111,7 +116,7 @@ pub enum TuiSource {
 pub struct TuiConfig {
     /// 最上部の見出し（字間を空けて表示する）
     pub title: String,
-    /// 見出しの下に出すサーバ名
+    /// 見出しの下に出すサーバ名（ptp4l・PTP のマスタでは [`phc_server_label`]・[`master_server_label`]）
     pub server_label: String,
     /// 最下部に出す一文（スポンサー表記など）。`None` なら出さない
     pub footer: Option<String>,

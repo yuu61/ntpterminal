@@ -7,6 +7,7 @@
 use core::fmt;
 use std::io::Write;
 
+use application::description::PhcInfo;
 use application::port::PhcEventSink;
 use application::snapshot::PhcSnapshot;
 use domain::ptp_clock::{PhcEvent, PtpStatus, Timescale};
@@ -16,8 +17,9 @@ use serde_json::json;
 use super::render_rows;
 use super::stats::{RunningStats, describe, frequency_text, stats_json};
 use crate::format::ptp::{
-    clock_class_label, format_nanos, format_nanos_signed, phc_state_key, phc_state_label,
-    port_label, ptp_leap_key, ptp_leap_label, time_source_key, time_source_label, utc_offset_label,
+    clock_class_label, format_nanos, format_nanos_signed, phc_label, phc_state_key,
+    phc_state_label, port_label, ptp_leap_key, ptp_leap_label, time_source_key, time_source_label,
+    utc_offset_label,
 };
 use crate::format::{DisplayZone, format_date_time, format_offset_ms, format_rfc3339_utc};
 
@@ -27,8 +29,8 @@ pub struct PhcTarget {
     /// ptp4l の管理用ソケットの場所
     pub socket: String,
     pub domain: u8,
-    /// PHC の説明（"/dev/ptp0（同時読み取り）"）
-    pub phc: String,
+    /// 開いた PHC
+    pub phc: PhcInfo,
     /// PHC を使うポートの番号とインターフェース名
     pub ports: Vec<(u16, String)>,
 }
@@ -39,6 +41,12 @@ impl PhcTarget {
     pub fn ptp4l_label(&self) -> String {
         format!("{}（ドメイン {}）", self.socket, self.domain)
     }
+
+    /// PHC の説明: "/dev/ptp0（同時読み取り）"
+    #[must_use]
+    pub fn phc_label(&self) -> String {
+        phc_label(&self.phc)
+    }
 }
 
 /// `once` のテキスト出力。
@@ -48,7 +56,7 @@ pub fn render_once_text(target: &PhcTarget, snapshot: &PhcSnapshot, zone: &Displ
     let text = |value: Option<String>| value.unwrap_or_else(|| "--".to_owned());
     let mut rows = vec![
         ("ptp4l", target.ptp4l_label()),
-        ("PHC", target.phc.clone()),
+        ("PHC", target.phc_label()),
         (
             "状態",
             phc_state_label(snapshot.state, status, snapshot.status_error.as_deref()),
@@ -111,7 +119,7 @@ pub fn render_once_json(target: &PhcTarget, snapshot: &PhcSnapshot) -> String {
         "ok": true,
         "ptp4l": target.socket,
         "domain": target.domain,
-        "phc": target.phc,
+        "phc": target.phc_label(),
         "state": phc_state_key(snapshot.state),
         "synchronized": snapshot.state.shows_time(),
         "ptp4l_status": snapshot.status.as_ref().map(|ptp| status_json(ptp, &target.ports)),
@@ -127,7 +135,7 @@ pub fn render_once_error_json(target: &PhcTarget, error: &str) -> String {
     json!({
         "ok": false,
         "ptp4l": target.socket,
-        "phc": target.phc,
+        "phc": target.phc_label(),
         "error": error,
     })
     .to_string()
@@ -203,7 +211,7 @@ impl<W: Write> PhcStatsReporter<W> {
                 self.out,
                 "ptp4l {} と PHC {} を {interval_ms} ms 間隔で読みます",
                 self.target.ptp4l_label(),
-                self.target.phc
+                self.target.phc_label()
             ));
         }
     }
@@ -219,7 +227,7 @@ impl<W: Write> PhcStatsReporter<W> {
     }
 
     fn summary_text(&self) -> String {
-        let mut text = format!("--- {} の統計 ---\n", self.target.phc);
+        let mut text = format!("--- {} の統計 ---\n", self.target.phc_label());
         let Some(snapshot) = self.last.as_ref() else {
             text.push_str("読んでいません\n");
             return text;
@@ -271,7 +279,7 @@ impl<W: Write> PhcStatsReporter<W> {
         json!({
             "event": "summary",
             "ptp4l": self.target.socket,
-            "phc": self.target.phc,
+            "phc": self.target.phc_label(),
             "attempts": stats.attempts,
             "readings": stats.readings,
             "read_failures": stats.read_failures,
@@ -411,6 +419,7 @@ const fn finished_seq(event: &PhcEvent) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use application::description::PhcReadMethod;
     use domain::ptp_clock::{
         ClockIdentity, ClockQuality, LeapWarning, PhcState, PhcStats, PortState, PortStatus,
         TimeProperties, TimeSourceKind,
@@ -422,7 +431,12 @@ mod tests {
         PhcTarget {
             socket: "/var/run/ptp4l".to_owned(),
             domain: 0,
-            phc: "/dev/ptp0（同時読み取り）".to_owned(),
+            phc: PhcInfo {
+                path: "/dev/ptp0".to_owned(),
+                virtual_clock: false,
+                from_interface: false,
+                method: PhcReadMethod::Precise,
+            },
             ports: vec![(1, "eno1".to_owned())],
         }
     }

@@ -256,7 +256,7 @@ impl<P: PtpPort> PtpSlaveService<P> {
         } else {
             self.source.last_failure().map_or_else(
                 || "時間内に交換が終わりませんでした".to_owned(),
-                str::to_owned,
+                ToString::to_string,
             )
         };
         PtpOnceError::NoSample(reason)

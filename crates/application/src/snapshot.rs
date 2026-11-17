@@ -3,7 +3,8 @@
 use core::net::SocketAddr;
 
 use domain::ptp_clock::{
-    MasterSource, MasterState, MasterStats, MasterStatus, PhcSource, PhcState, PhcStats, PtpStatus,
+    ExchangeFailure, MasterSource, MasterState, MasterStats, MasterStatus, PhcSource, PhcState,
+    PhcStats, PtpStatus,
 };
 use domain::receiver::ReceiverStatus;
 use domain::shared_kernel::{PcTime, TimeDelta};
@@ -94,7 +95,7 @@ pub struct MasterSnapshot {
     pub frequency: Option<FrequencyOffset>,
     pub last_success: Option<PcTime>,
     /// 直近の交換が失敗した理由（標本を作れたら `None` に戻る）
-    pub last_failure: Option<String>,
+    pub last_failure: Option<ExchangeFailure>,
     /// 違うドメインのメッセージが届いたドメイン番号
     pub other_domains: Vec<u8>,
     /// 選んだマスタのアドレス（直近の Sync の送り手）
@@ -124,7 +125,7 @@ impl MasterSnapshot {
             selected_sample: source.selected_sample(),
             frequency: source.frequency(),
             last_success: source.last_success(),
-            last_failure: source.last_failure().map(str::to_owned),
+            last_failure: source.last_failure().cloned(),
             other_domains: source.other_domains().to_vec(),
             master_address,
             receive_error: receive_error.map(str::to_owned),

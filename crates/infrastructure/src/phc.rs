@@ -19,6 +19,7 @@ use std::fs::File;
 use std::io;
 use std::os::fd::AsRawFd as _;
 
+use application::description::PhcReadMethod;
 use application::port::{ClockPort, PhcPort, PhcReadError};
 use domain::ptp_clock::{PhcReading, PhcTime};
 use nix::libc;
@@ -55,12 +56,12 @@ impl OffsetMethod {
     /// PHC の表示で使う読み方（精度の高い順）。
     pub(crate) const ANY: [Self; 3] = [Self::Precise, Self::Extended, Self::Basic];
 
-    /// 画面に出す名前。
-    pub(crate) const fn label(self) -> &'static str {
+    /// 表示に渡す読み方。
+    pub(crate) const fn info(self) -> PhcReadMethod {
         match self {
-            Self::Precise => "同時読み取り",
-            Self::Extended => "前後の読みで挟む",
-            Self::Basic => "前後の読みで挟む・粗い",
+            Self::Precise => PhcReadMethod::Precise,
+            Self::Extended => PhcReadMethod::Extended,
+            Self::Basic => PhcReadMethod::Basic,
         }
     }
 }

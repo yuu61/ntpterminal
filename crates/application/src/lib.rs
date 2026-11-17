@@ -6,6 +6,7 @@
 extern crate alloc;
 
 pub mod acl;
+pub mod description;
 pub mod polling_policy;
 pub mod port;
 pub mod snapshot;

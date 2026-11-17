@@ -18,6 +18,7 @@ use core::fmt;
 use std::io;
 use std::path::{Path, PathBuf};
 
+use application::description::PhcReadMethod;
 use application::port::{ClockPort, PacketPort, PhcPort};
 
 #[cfg(target_os = "linux")]
@@ -52,8 +53,8 @@ pub struct OpenedPhc {
     pub port: Box<dyn PhcPort>,
     /// "/dev/ptp0"
     pub path: String,
-    /// 読み方の名前（"同時読み取り" など）
-    pub method: &'static str,
+    /// 実際に使えた読み方
+    pub method: PhcReadMethod,
 }
 
 impl fmt::Debug for OpenedPhc {
@@ -115,7 +116,7 @@ pub fn open_phc(index: u32, clock: Arc<dyn ClockPort>) -> io::Result<OpenedPhc> 
     let device = PhcDevice::open(index, clock)?;
     Ok(OpenedPhc {
         path: device.path().to_owned(),
-        method: device.method().label(),
+        method: device.method().info(),
         port: Box::new(device),
     })
 }
