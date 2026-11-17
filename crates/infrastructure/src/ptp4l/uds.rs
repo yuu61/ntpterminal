@@ -1,4 +1,8 @@
 //! ptp4l の管理用ソケットへの送受信（Unix ドメインソケットのデータグラム。抽象名前空間の名前で bind する）。
+//!
+//! ptp4l が起動し直すと、つないでいた相手（前の ptp4l のソケット）はなくなり、送ると `ECONNREFUSED`（その後は
+//! `ENOTCONN`）になる。そのときは同じ場所につなぎ直して 1 回だけ送り直す（つなぎ直さないと、ptp4l が戻っても
+//! 応答なしのままになる）。
 
 use alloc::sync::Arc;
 use core::sync::atomic::{AtomicU32, Ordering};
@@ -6,7 +10,7 @@ use core::time::Duration;
 use std::io;
 use std::os::linux::net::SocketAddrExt as _;
 use std::os::unix::net::{SocketAddr, UnixDatagram};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process;
 
 use application::port::{ClockPort, Inbound, PacketPort, TransportError};
@@ -23,6 +27,8 @@ static NEXT_NAME: AtomicU32 = AtomicU32::new(0);
 /// ptp4l の管理用ソケットへの送受信（[`PacketPort`] の実装）。
 pub(super) struct Ptp4lSocket {
     socket: UnixDatagram,
+    /// ptp4l の管理用ソケットの場所（ptp4l が起動し直したら、つなぎ直す）
+    path: PathBuf,
     clock: Arc<dyn ClockPort>,
     buffer: Vec<u8>,
 }
@@ -54,6 +60,7 @@ impl Ptp4lSocket {
         })?;
         Ok(Self {
             socket,
+            path: path.to_path_buf(),
             clock,
             buffer: vec![0; MAX_MESSAGE_LEN],
         })
@@ -62,12 +69,24 @@ impl Ptp4lSocket {
 
 impl PacketPort for Ptp4lSocket {
     fn send(&mut self, payload: &[u8]) -> Result<LocalStamp, TransportError> {
+        let io_error = |error: io::Error| TransportError::Io(error.to_string());
         let sent = self.clock.now();
-        let _len: usize = self
-            .socket
-            .send(payload)
-            .map_err(|error| TransportError::Io(error.to_string()))?;
-        Ok(sent)
+        match self.socket.send(payload) {
+            Ok(_len) => Ok(sent),
+            // ptp4l が起動し直した: つなぎ直して、1 回だけ送り直す
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    io::ErrorKind::ConnectionRefused | io::ErrorKind::NotConnected
+                ) =>
+            {
+                self.socket.connect(&self.path).map_err(io_error)?;
+                let resent = self.clock.now();
+                let _len: usize = self.socket.send(payload).map_err(io_error)?;
+                Ok(resent)
+            }
+            Err(error) => Err(io_error(error)),
+        }
     }
 
     fn recv(&mut self, timeout: Duration) -> Result<Option<Inbound>, TransportError> {

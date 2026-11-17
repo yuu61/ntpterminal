@@ -29,8 +29,9 @@ use crate::timestamping::{TimestampSource, TimestampingStatus};
 
 /// 1 回の受信待ちの上限。何も起きなくてもこの間隔でループが回る。
 const DEFAULT_MAX_WAIT: Duration = Duration::from_millis(100);
-/// 回数を決めて測るとき、マスタが見つからないまま諦めるまでの時間
-const NO_MASTER_LIMIT: TimeDelta = TimeDelta::from_secs(30);
+/// 回数を決めて測るとき、交換が進まない（マスタが見つからない・選んだマスタの Sync が届かない・マスタを
+/// 見失った）まま諦めるまでの時間。交換の間隔の 2 回分の方が長ければそちら
+const NO_PROGRESS_LIMIT: TimeDelta = TimeDelta::from_secs(30);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PtpSlaveConfig {
@@ -77,7 +78,9 @@ pub struct PtpSlaveService<P> {
     clock: Arc<dyn ClockPort>,
     config: PtpSlaveConfig,
     timestamping: Arc<TimestampingStatus>,
-    master_address: Option<SocketAddr>,
+    /// 直近に Sync を受け取ったときに選んでいたマスタと、その Sync の送り手のアドレス。マスタが替わったら
+    /// 前のマスタのアドレスを出さないよう、識別子と組で持つ
+    master_address: Option<(PortIdentity, SocketAddr)>,
     receive_error: Option<String>,
 }
 
@@ -118,11 +121,13 @@ impl<P: PtpPort> PtpSlaveService<P> {
     }
 
     pub fn snapshot(&self) -> MasterSnapshot {
-        MasterSnapshot::capture(
-            &self.source,
-            self.master_address,
-            self.receive_error.as_deref(),
-        )
+        // いま選んでいるマスタのアドレスだけを出す（マスタを替えた・見失ったら、次の Sync まで出さない）
+        let selected = self.source.status().map(|status| status.master);
+        let address = self
+            .master_address
+            .filter(|&(master, _)| selected == Some(master))
+            .map(|(_, address)| address);
+        MasterSnapshot::capture(&self.source, address, self.receive_error.as_deref())
     }
 
     /// 1 ステップ進める: 期限切れの処理 → 最大 `max_wait` 受信を待つ → 受け取ったものを渡す（Sync なら
@@ -157,20 +162,28 @@ impl<P: PtpPort> PtpSlaveService<P> {
     /// 測り続け、起きたことを `sink` に通知する。`stop` が立ったら、最大 100ms ほどで戻る。
     ///
     /// `max_exchanges` を指定すると、その数の交換（標本にできたものと失敗したもの）を終えたら戻る。
-    /// そのときは、30 秒たってもマスタが見つからなければ諦めて戻る（マスタがいないと終わらなくなるため）。
+    /// そのときは、交換が 30 秒（交換の間隔の 2 回分の方が長ければそちら）進まなければ諦めて戻る
+    /// （マスタが見つからない・選んだマスタの Sync が届かない・マスタを見失ったときに、終わらなくなるため）。
     pub fn run_until<S>(&mut self, sink: &mut S, max_exchanges: Option<u64>, stop: &AtomicBool)
     where
         S: MasterEventSink + ?Sized,
     {
-        let started = self.clock.now().mono;
+        // 交換が最後に進んだ（標本ができた・失敗した）時刻と、そのときの交換の数
+        let mut progressed_at = self.clock.now().mono;
+        let mut finished = 0;
         while !stop.load(Ordering::Relaxed) {
             if let Some(max) = max_exchanges {
                 let stats = self.source.stats();
-                if stats.samples + stats.failures >= max {
+                let done = stats.samples + stats.failures;
+                if done >= max {
                     return;
                 }
-                let waited = self.clock.now().mono.since(started).unwrap_or_default();
-                if self.source.state() == MasterState::Listening && waited > NO_MASTER_LIMIT {
+                let now = self.clock.now().mono;
+                if done != finished {
+                    finished = done;
+                    progressed_at = now;
+                }
+                if now.since(progressed_at).unwrap_or_default() > self.no_progress_limit() {
                     return;
                 }
             }
@@ -277,7 +290,7 @@ impl<P: PtpPort> PtpSlaveService<P> {
                     .is_some_and(|status| status.master == sync.master);
                 self.source.sync_received(sync);
                 if from_selected {
-                    self.master_address = Some(inbound.from);
+                    self.master_address = Some((sync.master, inbound.from));
                 }
                 self.request_if_due(now)
             }
@@ -314,6 +327,17 @@ impl<P: PtpPort> PtpSlaveService<P> {
             Ok(sent) => self.source.request_sent(seq, sent),
             Err(error) => self.source.request_failed(seq, error.to_string()),
         }
+    }
+
+    /// 回数を決めて測るとき、交換が進まないまま諦めるまでの時間（30 秒か、交換の間隔の 2 回分の長い方）。
+    /// 交換は Sync を受け取ったときにしか始めないので、Sync の間隔の方が長ければそちらで数える。
+    fn no_progress_limit(&self) -> TimeDelta {
+        let sync = self
+            .source
+            .status()
+            .and_then(|status| status.sync_interval)
+            .unwrap_or(TimeDelta::ZERO);
+        NO_PROGRESS_LIMIT.max(self.source.request_interval().max(sync) * 2)
     }
 
     /// 次に何か（応答の期限）が起きるまで待つ時間。

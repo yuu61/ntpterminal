@@ -1,6 +1,7 @@
 //! 開発・テスト用の疑似 PTP マスタ。PTP のスレーブ（`--ptp`）を、実機のマスタなしで試すためのもの。
 //!
-//! - Announce（`log_announce_interval` ごと）と Sync（`log_sync_interval` ごと）、two-step なら `Follow_Up` を
+//! - Announce（`log_announce_interval` ごと。Sync と一緒に送るので、Sync の間隔より短くはしない）と
+//!   Sync（`log_sync_interval` ごと）、two-step なら `Follow_Up` を
 //!   `destination` へ送り、
 //!   `Delay_Req` に `Delay_Resp` で応える。Sync はイベント用のポート、ほかは一般用のポート（+1）へ送る
 //! - 時刻は「PC の壁時計 + `offset`」の UTC に、UTC との差（37 秒）を足した TAI（時刻系は PTP、UTC との差は確か）。
@@ -57,7 +58,8 @@ pub struct SimPtpMasterConfig {
     pub two_step: bool,
     /// Sync の間隔の log2（秒）
     pub log_sync_interval: i8,
-    /// Announce の間隔の log2（秒）。Sync の間隔より短くしても、Announce は Sync ごとにしか送らない
+    /// Announce の間隔の log2（秒）。Announce は Sync と一緒にしか送らないので、Sync の間隔より短くしたときは
+    /// Sync の間隔で送り、その間隔を知らせる（短い間隔を知らせると、スレーブは届かないとみなしてマスタに選ばない）
     pub log_announce_interval: i8,
 }
 
@@ -226,7 +228,9 @@ fn announce_loop(
     stop: &AtomicBool,
 ) {
     let interval = sync_interval(config.log_sync_interval);
-    let announce_every = sync_interval(config.log_announce_interval);
+    // Announce は Sync と一緒に送るので、Sync より短い間隔では送れない。実際に送る間隔を知らせる
+    let log_announce_interval = config.log_announce_interval.max(config.log_sync_interval);
+    let announce_every = sync_interval(log_announce_interval);
     let mut sync_sequence = 0u16;
     let mut announce_sequence = 0u16;
     let mut since_announce = announce_every;
@@ -238,7 +242,7 @@ fn announce_loop(
                     &config,
                     Flags::PTP_TIMESCALE.with(Flags::UTC_OFFSET_VALID),
                     announce_sequence,
-                    config.log_announce_interval,
+                    log_announce_interval,
                 ),
                 // clockClass 248（既定）・精度不明・時刻源は内部の発振器（0xA0）
                 body: Body::Announce(Announce {

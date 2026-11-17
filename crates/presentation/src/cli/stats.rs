@@ -185,7 +185,13 @@ impl<W: Write> StatsReporter<W> {
                     format_delay_ms(selected.delay().delta())
                 ),
             ));
-            rows.push(("周波数のずれ", frequency_text(snapshot.frequency)));
+            rows.push((
+                "周波数のずれ",
+                frequency_text(
+                    snapshot.frequency,
+                    "PC のモノトニック時計に対するサーバの時計の進み",
+                ),
+            ));
         }
         text.push_str(&render_rows(&rows));
         text
@@ -363,12 +369,14 @@ const fn finished_seq(event: &SyncEvent) -> Option<u64> {
 }
 
 /// 周波数のずれの表示: "+34.912 ppm（…）"。まだ推定していなければその旨。
-fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
+/// 周波数のずれの表示。`meaning` は値の意味（"PC のモノトニック時計に対するサーバの時計の進み" など）。
+/// まだ推定していなければその旨。
+pub(super) fn frequency_text(frequency: Option<FrequencyOffset>, meaning: &str) -> String {
     frequency.map_or_else(
         || "推定前（1 分以上の測定が必要）".to_owned(),
         |offset| {
             format!(
-                "{:+.3} ppm（PC のモノトニック時計に対するサーバの時計の進み。時計の表示の補正に使う）",
+                "{:+.3} ppm（{meaning}。時計の表示の補正に使う）",
                 offset.as_ppm_f64()
             )
         },

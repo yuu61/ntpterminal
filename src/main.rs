@@ -1314,7 +1314,7 @@ fn run_stats_phc(args: &StatsArgs) -> anyhow::Result<ExitCode> {
 }
 
 /// `stats --ptp`: マスタに問い合わせ続け、交換ごとの結果と統計を出す。`--count` は交換の回数
-/// （マスタが見つからなければ 30 秒で諦め、終了コード 1）。
+/// （交換が 30 秒進まなければ諦める。1 回も測れなければ終了コード 1）。
 fn run_stats_ptp(args: &StatsArgs) -> anyhow::Result<ExitCode> {
     let interval = polling_interval(args.interval_ms);
     let count = args.count.unwrap_or(DEFAULT_COUNT);

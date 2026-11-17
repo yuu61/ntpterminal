@@ -175,3 +175,22 @@ fn a_dead_ptp4l_is_reported_at_connect() {
     );
     remove(&path);
 }
+
+/// ptp4l が起動し直しても（前のソケットはなくなり、同じ場所に新しいソケットができる）、つなぎ直して問い合わせを続ける。
+#[test]
+fn reconnects_after_ptp4l_restarts() {
+    let path = socket_path("restart").unwrap();
+    let first = spawn_ptp4l(&path, 3).unwrap();
+    let mut ptp4l_client = client(&path, Duration::from_secs(2)).unwrap();
+    assert_eq!(ptp4l_client.discover_ports().unwrap().len(), 1);
+    // 前の ptp4l は終わり（ソケットを閉じ）、新しい ptp4l が同じ場所にソケットを作り直す
+    drop(first.join().unwrap().unwrap());
+    fs::remove_file(&path).unwrap();
+    let second = spawn_ptp4l(&path, 3).unwrap();
+    let ports = ptp4l_client.discover_ports().unwrap();
+    assert_eq!(ports.len(), 1);
+    assert_eq!(ports[0].interface, "eth0");
+    let (received, _) = second.join().unwrap().unwrap();
+    assert_eq!(received.len(), 3, "新しい ptp4l が問い合わせを受け取る");
+    remove(&path);
+}

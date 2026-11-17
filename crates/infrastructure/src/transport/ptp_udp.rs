@@ -126,6 +126,15 @@ pub fn open_ptp(
     let use_kernel = kernel_timestamps(options.timestamping)?;
     let local = interface_address(options.interface.as_ref(), options.master)?;
     let multicast = !local.is_loopback();
+    // ループバックではマルチキャストのグループに参加しないので、マルチキャストの `Delay_Req` には誰も応えない
+    if !multicast && options.master.is_none() {
+        return Err(io::Error::new(
+            ErrorKind::InvalidInput,
+            format!(
+                "ループバック（{local}）ではマルチキャストを使えません。マスタのアドレスを --ptp-master で指定してください"
+            ),
+        ));
+    }
     // ループバックではマルチキャストを使わないので、ループバックに bind する（Windows のファイアウォールの確認を避ける）
     let bind_ip = if multicast {
         Ipv4Addr::UNSPECIFIED
@@ -554,6 +563,7 @@ impl Receiving {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clock::SystemClock;
 
     #[test]
     fn interfaces_are_addresses_or_names() {
@@ -573,6 +583,26 @@ mod tests {
         assert_eq!(error.kind(), ErrorKind::Unsupported);
         assert!(error.to_string().contains("--timestamping kernel"));
         assert!(!kernel_timestamps(TimestampingMode::User).unwrap());
+    }
+
+    /// ループバックではマルチキャストを使わないので、マスタの指定がなければ（ソケットを開く前に）エラーにする。
+    #[test]
+    fn loopback_needs_a_master_address() {
+        let clock: Arc<dyn ClockPort> = Arc::new(SystemClock::new());
+        let Err(error) = open_ptp(
+            &PtpUdpOptions {
+                interface: Some(PtpInterface::Address(Ipv4Addr::LOCALHOST)),
+                event_port: 43_319,
+                master: None,
+                timestamping: TimestampingMode::User,
+            },
+            clock,
+            Arc::new(TimestampingStatus::new()),
+        ) else {
+            panic!("ループバックでマスタの指定がなければエラーのはず");
+        };
+        assert_eq!(error.kind(), ErrorKind::InvalidInput);
+        assert!(error.to_string().contains("--ptp-master"), "{error}");
     }
 
     #[test]

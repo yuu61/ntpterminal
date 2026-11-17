@@ -791,9 +791,14 @@ impl MasterSource {
         events.push(MasterEvent::ExchangeFailed { seq, detail });
     }
 
-    /// 標本が `Delay_Req` の 4 回分の間隔と応答の待ち時間を合わせたより長く届いていないか。
+    /// 標本が交換の 4 回分の間隔と応答の待ち時間を合わせたより長く届いていないか。
+    /// 交換は Sync を受け取ったときにしか始めないので、交換の間隔は `Delay_Req` の間隔と Sync の間隔の長い方。
     fn is_stale(&self, now: PcTime) -> bool {
-        let limit = self.request_interval() * STALE_INTERVALS + self.response_timeout();
+        let request = self.request_interval();
+        let cadence = self
+            .sync_log_interval
+            .map_or(request, |log| request.max(log_interval(log)));
+        let limit = cadence * STALE_INTERVALS + self.response_timeout();
         self.last_success
             .is_some_and(|last| now.since(last).is_ok_and(|silence| silence > limit))
     }
@@ -1285,6 +1290,29 @@ mod tests {
                 to: MasterState::Synchronized,
             })
         );
+    }
+
+    /// マスタの最小間隔（62.5ms）も利用者の指定（100ms）も短く、Sync が 1 秒ごとのとき: 標本は Sync ごとにしか
+    /// できないので、標本の途絶えは Sync の間隔で数える（`Delay_Req` の間隔で数えると、Sync の合間に自走中になる）。
+    #[test]
+    fn slow_syncs_do_not_flap_into_holdover() {
+        let mut source = selected(100);
+        for (sequence_id, at) in [(1u16, 2_000_000i64), (2, 3_000_000)] {
+            source.sync_received(sync(sequence_id, at, false));
+            let seq = source.request_due(mono(at)).expect("送る時のはず");
+            drop(source.request_sent(seq, precise(at + 200)));
+            let mut response = delay_resp(seq, at + 200);
+            response.log_min_interval = Some(-4);
+            let events = source.delay_resp_received(response);
+            assert!(
+                matches!(events.first(), Some(MasterEvent::SampleAccepted { .. })),
+                "{events:?}"
+            );
+            // 次の Sync（1 秒後）の直前まで同期のまま
+            assert_eq!(source.on_tick(mono(at + 990_000)), []);
+            assert_eq!(source.state(), MasterState::Synchronized);
+        }
+        assert_eq!(source.request_interval(), TimeDelta::from_millis(100));
     }
 
     #[test]

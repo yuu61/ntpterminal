@@ -74,6 +74,10 @@ struct Master {
     /// `Delay_Resp` に入れる最小間隔
     log_min_delay_req: i8,
     answers_delay_req: bool,
+    /// Sync（と `Follow_Up`）を送るか（偽なら Announce だけ）
+    sends_sync: bool,
+    /// この PC の時刻から後は何も送らない（マスタが止まった）
+    silent_from: Option<u64>,
     /// 届いた `Delay_Req`（PC の時刻と中身）
     requests: Vec<(u64, PtpMessage)>,
     /// これから届くメッセージ（PC の時刻の順。同じ時刻なら入れた順）
@@ -97,6 +101,8 @@ impl Default for Master {
             log_announce_interval: 0,
             log_min_delay_req: 0,
             answers_delay_req: true,
+            sends_sync: true,
+            silent_from: None,
             requests: Vec::new(),
             pending: BTreeMap::new(),
             generated_until: 0,
@@ -174,6 +180,10 @@ impl Master {
     fn generate(&mut self, until: u64) {
         while self.generated_until <= until {
             let at = self.generated_until;
+            if self.silent_from.is_some_and(|from| at >= from) {
+                self.generated_until += 1_000_000;
+                continue;
+            }
             let arrive = at + self.one_way_nanos;
             if at.is_multiple_of(self.announce_interval_nanos) {
                 let announce = PtpMessage {
@@ -199,7 +209,7 @@ impl Master {
             }
             // Sync は Announce から 50ms ずらす
             let sync_at = at + 50_000_000;
-            if at.is_multiple_of(self.sync_interval_nanos) {
+            if self.sends_sync && at.is_multiple_of(self.sync_interval_nanos) {
                 let flags = if self.two_step {
                     Flags::TWO_STEP
                 } else {
@@ -470,6 +480,49 @@ fn a_bounded_run_gives_up_without_a_master() {
     assert_eq!(service.snapshot().state, MasterState::Listening);
     assert_eq!(service.snapshot().other_domains, [24]);
     assert_eq!(lock(&network).request_times(), []);
+}
+
+/// 回数を決めて測るとき、マスタを選べても Sync が届かなければ（交換を始められないので）30 秒で諦める。
+#[test]
+fn a_bounded_run_gives_up_without_syncs() {
+    let master = Master {
+        sends_sync: false,
+        ..Master::default()
+    };
+    let (mut service, network, _status) = slave(master, config(0, 1_000, false));
+    let mut sink = Collect { events: Vec::new() };
+    service.run_until(&mut sink, Some(5), &AtomicBool::new(false));
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.state, MasterState::Uncalibrated);
+    assert_eq!(snapshot.stats.samples + snapshot.stats.failures, 0);
+    assert_eq!(
+        lock(&network).request_times(),
+        [],
+        "Sync がなければ送らない"
+    );
+}
+
+/// 回数を決めて測るとき、途中でマスタを見失ったら（自走中になり、交換が進まない）30 秒で諦める。
+/// 見失ったマスタのアドレスは出さない。
+#[test]
+fn a_bounded_run_gives_up_after_losing_the_master() {
+    let master = Master {
+        silent_from: Some(3 * NANOS_PER_SEC),
+        ..Master::default()
+    };
+    let (mut service, _network, _status) = slave(master, config(0, 1_000, false));
+    let mut sink = Collect { events: Vec::new() };
+    service.run_until(&mut sink, Some(10), &AtomicBool::new(false));
+    let snapshot = service.snapshot();
+    assert_eq!(snapshot.state, MasterState::Holdover);
+    assert_eq!(snapshot.stats.samples, 2, "1.05 秒と 2.05 秒の Sync で測る");
+    assert!(
+        sink.events
+            .iter()
+            .any(|event| matches!(*event, MasterEvent::MasterLost { .. }))
+    );
+    assert_eq!(snapshot.status, None);
+    assert_eq!(snapshot.master_address, None);
 }
 
 #[test]

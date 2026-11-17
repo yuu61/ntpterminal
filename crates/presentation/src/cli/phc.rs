@@ -14,7 +14,7 @@ use domain::time_sync::FrequencyOffset;
 use serde_json::json;
 
 use super::render_rows;
-use super::stats::{RunningStats, describe, stats_json};
+use super::stats::{RunningStats, describe, frequency_text, stats_json};
 use crate::format::ptp::{
     clock_class_label, format_nanos, format_nanos_signed, phc_state_key, phc_state_label,
     port_label, ptp_leap_key, ptp_leap_label, time_source_key, time_source_label, utc_offset_label,
@@ -248,7 +248,13 @@ impl<W: Write> PhcStatsReporter<W> {
         }
         if self.pc_offset_ms.count() > 0 {
             rows.push(("PC との差 [ms]", describe(&self.pc_offset_ms, true)));
-            rows.push(("周波数のずれ", frequency_text(snapshot.frequency)));
+            rows.push((
+                "周波数のずれ",
+                frequency_text(
+                    snapshot.frequency,
+                    "PC のモノトニック時計に対する PHC の進み",
+                ),
+            ));
         } else {
             rows.push(("結果", "PHC を読めませんでした".to_owned()));
         }
@@ -400,19 +406,6 @@ const fn finished_seq(event: &PhcEvent) -> Option<u64> {
         | PhcEvent::ClockStepDetected { .. }
         | PhcEvent::StateChanged { .. } => None,
     }
-}
-
-/// 周波数のずれの表示。まだ推定していなければその旨。
-fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
-    frequency.map_or_else(
-        || "推定前（1 分以上の測定が必要）".to_owned(),
-        |offset| {
-            format!(
-                "{:+.3} ppm（PC のモノトニック時計に対する PHC の進み。時計の表示の補正に使う）",
-                offset.as_ppm_f64()
-            )
-        },
-    )
 }
 
 #[cfg(test)]

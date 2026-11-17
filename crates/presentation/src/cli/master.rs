@@ -16,7 +16,7 @@ use domain::time_sync::FrequencyOffset;
 use serde_json::json;
 
 use super::render_rows;
-use super::stats::{RunningStats, describe, stats_json};
+use super::stats::{RunningStats, describe, frequency_text, stats_json};
 use crate::format::ptp::{
     clock_class_label, format_nanos, intervals_label, master_label, master_state_key,
     master_state_label, ptp_leap_key, ptp_leap_label, time_source_key, time_source_label,
@@ -253,7 +253,13 @@ impl<W: Write> MasterStatsReporter<W> {
                 "経路遅延 [µs]",
                 describe(&self.path_delay_ns.scaled(1e-3), false),
             ));
-            rows.push(("周波数のずれ", frequency_text(snapshot.frequency)));
+            rows.push((
+                "周波数のずれ",
+                frequency_text(
+                    snapshot.frequency,
+                    "PC のモノトニック時計に対するマスタの時計の進み",
+                ),
+            ));
         } else {
             rows.push(("結果", "マスタの時刻を測れませんでした".to_owned()));
         }
@@ -396,19 +402,6 @@ impl<W: Write> MasterEventSink for MasterStatsReporter<W> {
             self.write_summary();
         }
     }
-}
-
-/// 周波数のずれの表示。まだ推定していなければその旨。
-fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
-    frequency.map_or_else(
-        || "推定前（1 分以上の測定が必要）".to_owned(),
-        |offset| {
-            format!(
-                "{:+.3} ppm（PC のモノトニック時計に対するマスタの時計の進み。時計の表示の補正に使う）",
-                offset.as_ppm_f64()
-            )
-        },
-    )
 }
 
 #[cfg(test)]
