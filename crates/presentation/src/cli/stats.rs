@@ -20,7 +20,7 @@ use crate::format::{
 
 /// 平均・標準偏差を逐次計算する（Welford 法）。
 #[derive(Clone, Copy, Debug, Default)]
-struct RunningStats {
+pub(super) struct RunningStats {
     count: u64,
     mean: f64,
     m2: f64,
@@ -29,7 +29,12 @@ struct RunningStats {
 }
 
 impl RunningStats {
-    fn push(&mut self, value: f64) {
+    /// 値の数。
+    pub(super) const fn count(&self) -> u64 {
+        self.count
+    }
+
+    pub(super) fn push(&mut self, value: f64) {
         self.count += 1;
         if self.count == 1 {
             self.min = value;
@@ -41,6 +46,17 @@ impl RunningStats {
         let delta = value - self.mean;
         self.mean += delta / self.count as f64;
         self.m2 = delta.mul_add(value - self.mean, self.m2);
+    }
+
+    /// すべての値を `factor` 倍（正の数）したときの統計。表示の単位を変えるのに使う。
+    pub(super) const fn scaled(self, factor: f64) -> Self {
+        Self {
+            count: self.count,
+            mean: self.mean * factor,
+            m2: self.m2 * factor * factor,
+            min: self.min * factor,
+            max: self.max * factor,
+        }
     }
 
     /// 標本標準偏差。
@@ -169,7 +185,13 @@ impl<W: Write> StatsReporter<W> {
                     format_delay_ms(selected.delay().delta())
                 ),
             ));
-            rows.push(("周波数のずれ", frequency_text(snapshot.frequency)));
+            rows.push((
+                "周波数のずれ",
+                frequency_text(
+                    snapshot.frequency,
+                    "PC のモノトニック時計に対するサーバの時計の進み",
+                ),
+            ));
         }
         text.push_str(&render_rows(&rows));
         text
@@ -347,19 +369,21 @@ const fn finished_seq(event: &SyncEvent) -> Option<u64> {
 }
 
 /// 周波数のずれの表示: "+34.912 ppm（…）"。まだ推定していなければその旨。
-fn frequency_text(frequency: Option<FrequencyOffset>) -> String {
+/// 周波数のずれの表示。`meaning` は値の意味（"PC のモノトニック時計に対するサーバの時計の進み" など）。
+/// まだ推定していなければその旨。
+pub(super) fn frequency_text(frequency: Option<FrequencyOffset>, meaning: &str) -> String {
     frequency.map_or_else(
         || "推定前（1 分以上の測定が必要）".to_owned(),
         |offset| {
             format!(
-                "{:+.3} ppm（PC のモノトニック時計に対するサーバの時計の進み。時計の表示の補正に使う）",
+                "{:+.3} ppm（{meaning}。時計の表示の補正に使う）",
                 offset.as_ppm_f64()
             )
         },
     )
 }
 
-fn describe(stats: &RunningStats, signed: bool) -> String {
+pub(super) fn describe(stats: &RunningStats, signed: bool) -> String {
     let value = |number: f64| {
         if signed {
             format!("{number:+.3}")
@@ -376,7 +400,7 @@ fn describe(stats: &RunningStats, signed: bool) -> String {
     )
 }
 
-fn stats_json(stats: &RunningStats) -> serde_json::Value {
+pub(super) fn stats_json(stats: &RunningStats) -> serde_json::Value {
     if stats.count == 0 {
         return serde_json::Value::Null;
     }

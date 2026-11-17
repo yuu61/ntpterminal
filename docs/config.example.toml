@@ -8,7 +8,7 @@
 #
 # - キーはコマンドラインの長いオプションと同じ名前で、値の書き方も同じ（--interval-ms 200 → interval-ms = 200）
 # - 優先順位はコマンドライン → 設定ファイル → 既定値。下の値はどれも例
-# - 真偽の項目（trend / json / no-df）を true にすると、コマンドラインからは false に戻せない
+# - 真偽の項目（trend / json / no-df / ptp4l / ptp / one-step）を true にすると、コマンドラインからは false に戻せない
 # - 知らないキーや範囲外の値はエラーになる。--allow-fast-poll は書けない（毎回コマンドラインで指定する）
 # - 共通の項目は、最初の [tui] などの節より前に書く（TOML では、節の後に書いたキーはその節のものになる）
 
@@ -42,6 +42,27 @@
 # vlan = 10
 # pcp = 5
 
+# NTP サーバの代わりに、ptp4l（linuxptp）が合わせる NIC の時計（PHC）を表示する（Linux のみ・root が必要）。
+# true にすると server・送信方式の項目（transport など）・snmp-* と一緒には使えない
+# ptp4l = true
+# 以下は ptp4l = true のときだけ: ptp4l の管理用ソケット（既定: /var/run/ptp/ptp4l、なければ /var/run/ptp4l）・
+# 表示する PHC（/dev/ptpN かインターフェース名。ptp4l が複数の PHC を使うときだけ要る）
+# ptp4l-socket = "/var/run/ptp4l"
+# phc = "/dev/ptp0"
+
+# NTP サーバの代わりに、PTP のスレーブとしてネットワークの PTP マスタに問い合わせる（既定のプロファイル: UDP・E2E）。
+# UDP の 319/320 番を使うので、Linux では root か CAP_NET_BIND_SERVICE が要る。
+# true にすると server・送信方式の項目（timestamping 以外）・snmp-* と一緒には使えない。ptp4l = true とも一緒に使えない
+# ptp = true
+# 以下は ptp = true のときだけ: 使うインターフェース（名前か IPv4 アドレス。名前は Linux のみ）・
+# マスタのアドレス（指定すると Delay_Req をユニキャストで送る）・イベント用の UDP ポート（一般用はその次の番号）
+# ptp-interface = "eth0"
+# ptp-master = "192.168.1.50"
+# ptp-port = 319
+
+# PTP のドメイン番号（ptp4l か ptp を true にしたときに使う。既定: 0）
+# ptp-domain = 0
+
 [tui]
 # interval-ms = 500
 # title = "NTP CLOCK"
@@ -74,3 +95,16 @@
 # 疑似 SNMP エージェント（コミュニティ名は public）: meinberg-os / meinberg-ltng / meinberg-lt / microchip-s650
 # snmp-mib = "meinberg-ltng"
 # snmp-bind = "127.0.0.1:16100"
+
+[sim-ptp-master]
+# 待ち受けるイベント用の UDP ポート（一般用はその次の番号）。1024 未満は root か CAP_NET_BIND_SERVICE が要る
+# port = 319
+# 送り先（既定: マルチキャストの 224.0.1.129。ポートを省くと port と同じ）
+# to = "224.0.1.129"
+# マルチキャストで送り、グループに参加するインターフェースの IPv4 アドレス（ユニキャストでは待ち受けるアドレス）
+# interface = "192.168.1.10"
+# domain = 0
+# offset-ms = 2.5
+# one-step = true
+# Sync の間隔の log2（秒。-7〜4。-3 なら 0.125 秒）
+# log-sync-interval = 0

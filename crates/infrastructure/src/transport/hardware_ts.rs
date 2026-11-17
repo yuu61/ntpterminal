@@ -12,8 +12,7 @@
 //! - ソケットに `TX_HARDWARE` を頼むのは、NIC の送信が on になってから。e1000e は送信 off のまま頼まれると、
 //!   1 秒待って「clearing Tx timestamp hang」を出し、その間はほかの送信の時刻も取れなくなる
 //! - PHC の時刻は、その都度 PHC − REALTIME を測って REALTIME の時刻に直し、ソフトウェアの時刻と同じ道
-//!   （`rebase_kernel_time`）でモノトニック時計に写す。測り方は `PTP_SYS_OFFSET_PRECISE`（NIC とシステムの時計を
-//!   同時に読む）で、使えなければ `PTP_SYS_OFFSET_EXTENDED`（前後の読みの幅が最小の標本）
+//!   （`rebase_kernel_time`）でモノトニック時計に写す。測り方は [`crate::phc`] の先頭
 //!
 //! 限界:
 //! - root（NIC の設定に `CAP_NET_ADMIN`、`/dev/ptpN` を開く権限）が要る
@@ -28,7 +27,7 @@ use core::iter;
 use core::net::IpAddr;
 use core::ptr;
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicU8, Ordering};
-use std::fs::{self, File};
+use std::fs;
 use std::io;
 use std::os::fd::AsRawFd as _;
 use std::sync::Once;
@@ -39,6 +38,8 @@ use nix::ifaddrs::getifaddrs;
 use nix::libc;
 use nix::sys::signal::{SaFlags, SigAction, SigHandler, SigSet, Signal, raise, sigaction};
 use nix::sys::socket::{AddressFamily, SockFlag, SockType, socket};
+
+use crate::phc::{OffsetMethod, PhcClock};
 
 /// `linux/net_tstamp.h` の `HWTSTAMP_TX_ON`
 const HWTSTAMP_TX_ON: c_int = 1;
@@ -52,18 +53,13 @@ const ETHTOOL_GET_TS_INFO: u32 = 0x41;
 const HARDWARE_REPORTING: u32 = libc::SOF_TIMESTAMPING_TX_HARDWARE
     | libc::SOF_TIMESTAMPING_RX_HARDWARE
     | libc::SOF_TIMESTAMPING_RAW_HARDWARE;
-/// `PTP_SYS_OFFSET_EXTENDED` で読む標本の数
-const EXTENDED_SAMPLES: u32 = 5;
-/// `linux/ptp_clock.h` の `PTP_MAX_SAMPLES`（`ptp_sys_offset_extended` の配列の大きさ）
-const PTP_MAX_SAMPLES: usize = 25;
 /// `lower_*` をたどる深さの上限（ループの安全網）
 const MAX_LOWER_DEPTH: usize = 8;
-const NANOS_PER_SEC: i128 = 1_000_000_000;
-const ZERO_TIME: libc::ptp_clock_time = libc::ptp_clock_time {
-    sec: 0,
-    nsec: 0,
-    reserved: 0,
-};
+
+/// インターフェース `name` の PHC の番号（`ethtool -T` の PTP Hardware Clock）。PHC がなければ `None`。
+pub(crate) fn interface_phc(name: &str) -> Option<u32> {
+    ts_info(name).ok()?.phc()
+}
 
 /// NIC のハードウェアタイムスタンプ。drop すると、有効にした NIC の設定を元に戻す。
 pub(super) struct HardwareClock {
@@ -85,7 +81,7 @@ impl HardwareClock {
             )
         })?;
         // 権限が足りないときに NIC の設定を変えてしまわないよう、PHC を先に開く
-        let phc = PhcClock::open(phc_index)?;
+        let phc = PhcClock::open(phc_index, &OffsetMethod::FINE)?;
         let setting = NicSetting::apply(&device, capabilities)?;
         Ok(Self {
             device,
@@ -476,120 +472,6 @@ fn interface_ioctl(name: &[u8], request: InterfaceRequest<'_>) -> Result<(), Err
     Ok(())
 }
 
-/// PHC（`/dev/ptpN`）と、システムの時計との差の測り方。
-struct PhcClock {
-    file: File,
-    method: OffsetMethod,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum OffsetMethod {
-    /// NIC とシステムの時計を同時に読む（対応している NIC だけ）
-    Precise,
-    /// システムの時計で PHC の読みを挟み、幅が最小の標本を使う
-    Extended,
-}
-
-impl PhcClock {
-    fn open(index: u32) -> io::Result<Self> {
-        let path = format!("/dev/ptp{index}");
-        let file = File::open(&path).map_err(|error| {
-            io::Error::new(
-                error.kind(),
-                format!("{path} を開けません（root が必要です）: {error}"),
-            )
-        })?;
-        let mut clock = Self {
-            file,
-            method: OffsetMethod::Precise,
-        };
-        if clock.phc_minus_realtime().is_err() {
-            clock.method = OffsetMethod::Extended;
-            let _offset = clock.phc_minus_realtime().map_err(|error| {
-                io::Error::new(
-                    error.kind(),
-                    format!("{path} とシステムの時計の差を測れません: {error}"),
-                )
-            })?;
-        }
-        Ok(clock)
-    }
-
-    /// いまの PHC − REALTIME（ナノ秒）。
-    fn phc_minus_realtime(&self) -> io::Result<i128> {
-        match self.method {
-            OffsetMethod::Precise => {
-                let mut request = libc::ptp_sys_offset_precise {
-                    device: ZERO_TIME,
-                    sys_realtime: ZERO_TIME,
-                    sys_monoraw: ZERO_TIME,
-                    rsv: [0; 4],
-                };
-                ptp_ioctl(&self.file, PtpRequest::Precise(&mut request))?;
-                Ok(nanos(request.device) - nanos(request.sys_realtime))
-            }
-            OffsetMethod::Extended => {
-                let mut request = libc::ptp_sys_offset_extended {
-                    n_samples: EXTENDED_SAMPLES,
-                    clockid: libc::CLOCK_REALTIME,
-                    rsv: [0; 2],
-                    ts: [[ZERO_TIME; 3]; PTP_MAX_SAMPLES],
-                };
-                ptp_ioctl(&self.file, PtpRequest::Extended(&mut request))?;
-                let samples: Vec<[i128; 3]> = request
-                    .ts
-                    .iter()
-                    .take(usize::try_from(request.n_samples).unwrap_or(0))
-                    .map(|sample| sample.map(nanos))
-                    .collect();
-                narrowest_offset(&samples).ok_or_else(|| {
-                    io::Error::other("PHC とシステムの時計の差を測れる標本がありません")
-                })
-            }
-        }
-    }
-}
-
-/// `[前のシステムの時刻, PHC の時刻, 後のシステムの時刻]` の標本から、前後の幅が最小のものを選び、
-/// PHC − システムの時刻（前後の中点）を返す。
-fn narrowest_offset(samples: &[[i128; 3]]) -> Option<i128> {
-    samples
-        .iter()
-        .filter(|&&[before, _, after]| after >= before)
-        .min_by_key(|&&[before, _, after]| after - before)
-        .map(|&[before, phc, after]| phc - before.midpoint(after))
-}
-
-fn nanos(time: libc::ptp_clock_time) -> i128 {
-    i128::from(time.sec) * NANOS_PER_SEC + i128::from(time.nsec)
-}
-
-/// PHC への ioctl の種類と、渡す構造体（種類ごとに型が決まる）。
-enum PtpRequest<'data> {
-    Precise(&'data mut libc::ptp_sys_offset_precise),
-    Extended(&'data mut libc::ptp_sys_offset_extended),
-}
-
-#[expect(
-    unsafe_code,
-    reason = "PHC とシステムの時計の差は、/dev/ptpN への ioctl でしか読めない"
-)]
-fn ptp_ioctl(file: &File, request: PtpRequest<'_>) -> io::Result<()> {
-    let (code, data): (libc::Ioctl, *mut libc::c_void) = match request {
-        PtpRequest::Precise(offset) => (libc::PTP_SYS_OFFSET_PRECISE, ptr::from_mut(offset).cast()),
-        PtpRequest::Extended(offset) => {
-            (libc::PTP_SYS_OFFSET_EXTENDED, ptr::from_mut(offset).cast())
-        }
-    };
-    // SAFETY: `file` は開いている /dev/ptpN。`data` は要求の種類ごとにカーネルが期待する構造体
-    // （ptp_sys_offset_precise / ptp_sys_offset_extended）を指し、借用でこの呼び出しの間は生きている。
-    let result = unsafe { libc::ioctl(file.as_raw_fd(), code, data) };
-    if result.is_negative() {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 // ---- シグナルを受けたときに NIC の設定を戻す ----
 // ハンドラの中ではヒープも Mutex も使えないので、戻す内容を atomic に置いておく。
 
@@ -871,27 +753,6 @@ mod tests {
         let topology: &[(&str, &[&str])] = &[("a", &["b"]), ("b", &["a", "eth0"])];
         let clocks = [("eth0", Inspection::Usable)];
         assert_eq!(resolve(topology, &clocks, "a").unwrap(), "eth0");
-    }
-
-    #[test]
-    fn picks_the_narrowest_extended_sample() {
-        let samples = [
-            [1_000, 5_000_600, 1_200], // 幅 200
-            [2_000, 5_001_550, 2_100], // 幅 100 → 中点 2_050、PHC − システム = 4_999_500
-            [3_000, 5_002_000, 2_900], // 前後が逆（時計が戻された）: 使わない
-        ];
-        assert_eq!(narrowest_offset(&samples), Some(4_999_500));
-        assert_eq!(narrowest_offset(&[]), None);
-    }
-
-    #[test]
-    fn converts_ptp_clock_time_to_nanoseconds() {
-        let time = libc::ptp_clock_time {
-            sec: 2,
-            nsec: 5,
-            reserved: 0,
-        };
-        assert_eq!(nanos(time), 2_000_000_005);
     }
 
     #[test]

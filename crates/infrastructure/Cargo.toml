@@ -13,10 +13,10 @@ name = "infrastructure"
 [dependencies]
 domain.workspace = true
 application.workspace = true
-
-# raw-ip モード（Linux のみ）
-[target.'cfg(target_os = "linux")'.dependencies]
+# raw-ip モード（Linux）と、PTP のソケット（SO_REUSEADDR・マルチキャストの送信インターフェース。全 OS）
 socket2.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
 nix.workspace = true
 
 [lints]

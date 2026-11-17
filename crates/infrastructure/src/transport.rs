@@ -5,6 +5,7 @@
 //! - `link`: `AF_PACKET` で Ethernet フレームから作る。Linux のみ
 //! - `kernel_ts`: カーネルのタイムスタンプ（`SO_TIMESTAMPING`）。Linux のみ
 //! - `hardware_ts`: NIC のハードウェアのタイムスタンプ（PHC と NIC の設定）。Linux のみ
+//! - `ptp_udp`: PTP のスレーブの送受信（[`application::port::PtpPort`] の実装。UDP の 319・320 番）
 //!
 //! ヘッダを自由に作れるモードでも、送信元 IP は経路に合った自分のアドレスを入れる。偽る手段は作らない。
 
@@ -14,6 +15,7 @@ mod hardware_ts;
 mod kernel_ts;
 #[cfg(target_os = "linux")]
 mod link;
+mod ptp_udp;
 #[cfg(target_os = "linux")]
 mod raw_ip;
 mod udp;
@@ -28,7 +30,12 @@ use application::timestamping::TimestampingStatus;
 use domain::packet_crafting::{EthernetSpec, HeaderTemplate, MacAddr};
 
 #[cfg(target_os = "linux")]
+pub(crate) use hardware_ts::interface_phc;
+#[cfg(target_os = "linux")]
 pub use link::LinkTransport;
+pub use ptp_udp::{
+    OpenedPtp, PTP_EVENT_PORT, PTP_PRIMARY_GROUP, PtpInterface, PtpUdp, PtpUdpOptions, open_ptp,
+};
 #[cfg(target_os = "linux")]
 pub use raw_ip::RawIpTransport;
 pub use udp::UdpTransport;

@@ -1,7 +1,9 @@
-//! 直近の測定値の推移: オフセットと遅延の小さい棒グラフ。
+//! 直近の測定値の推移: 2 つの系列の小さい棒グラフ。
 //!
-//! - 成功した測定（`SyncSnapshot::last_sample`）を 1 回ずつ貯める。情報欄の値はクロックフィルタが
-//!   選んだ標本なので、最新の棒と一致しないことがある。見出しに「測定値」と書いて区別する
+//! - NTP: 成功した測定（`SyncSnapshot::last_sample`）のオフセットと遅延を 1 回ずつ貯める。情報欄の値は
+//!   クロックフィルタが選んだ標本なので、最新の棒と一致しないことがある。見出しに「測定値」と書いて区別する
+//! - ptp4l の PHC: 読めた ptp4l の状態の、マスタとの差（offsetFromMaster）と経路の遅延を 1 回ずつ貯める。
+//!   PTP の同期の良さはこちらに出る（PC との差は、PC の時計の合わせ方で決まる）
 //! - 棒は [`big_digits`](super::big_digits) と同じく、背景色付きの空白と `▄` で描く。`▁▂▃` などの
 //!   ブロック文字・点字・ratatui の `Sparkline`（中で `▁▂▃` を使う）は使わない。East Asian Ambiguous
 //!   （端末の設定で幅が 1 にも 2 にもなる）で、X のない Linux コンソールのフォントにも入っていないため
@@ -15,11 +17,10 @@ use ratatui::layout::Rect;
 use ratatui::style::Style;
 use ratatui::text::Span;
 
-use application::snapshot::SyncSnapshot;
 use domain::shared_kernel::TimeDelta;
-use domain::time_sync::Sample;
 
-use super::theme;
+use super::{SourceSnapshot, theme};
+use crate::format::ptp::{format_nanos, format_nanos_signed};
 use crate::format::{format_delay_ms, format_offset_ms};
 
 /// 貯める測定値の数。棒は常にこの本数分の幅を取り、新しい値を右端に置く。
@@ -34,31 +35,72 @@ const LABEL_GAP: u16 = 2;
 /// 棒と範囲の表示の間の空白
 const RANGE_GAP: u16 = 1;
 
+/// 履歴の 2 つの系列の種類。
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Series {
+    /// NTP のオフセットと遅延
+    #[default]
+    Ntp,
+    /// ptp4l のマスタとの差と経路の遅延
+    Ptp4l,
+    /// PTP のマスタと PC の差（マスタ − PC）と経路の遅延（片道）
+    PtpMaster,
+}
+
 /// 成功した測定値の履歴（古い順、最大 [`BARS`] 個）。
 #[derive(Clone, Debug, Default)]
 pub(super) struct SampleHistory {
-    samples: VecDeque<Sample>,
+    series: Series,
+    /// （1 つ目の系列, 2 つ目の系列）
+    values: VecDeque<(TimeDelta, TimeDelta)>,
     /// 最後に取り込んだときの成功回数
-    seen_successes: u64,
+    seen: u64,
 }
 
 impl SampleHistory {
     /// スナップショットを 1 つ取り込む。成功回数が増えていれば、その測定値を足す。
     ///
     /// スナップショットはイベントごとに届くので、1 回の成功で同じ内容のものが何度も来る。
-    /// 二重に数えないよう、`last_sample` ではなく成功回数で判定する。
-    pub(super) fn observe(&mut self, snapshot: &SyncSnapshot) {
-        if snapshot.stats.successes <= self.seen_successes {
-            return;
-        }
-        self.seen_successes = snapshot.stats.successes;
-        let Some(sample) = snapshot.last_sample else {
+    /// 二重に数えないよう、測定値ではなく成功回数で判定する。
+    pub(super) fn observe(&mut self, snapshot: &SourceSnapshot) {
+        let (series, count, value) = if let Some(ntp) = snapshot.ntp() {
+            (
+                Series::Ntp,
+                ntp.stats.successes,
+                ntp.last_sample
+                    .map(|sample| (sample.offset().delta(), sample.delay().delta())),
+            )
+        } else if let Some(phc) = snapshot.phc() {
+            (
+                Series::Ptp4l,
+                phc.stats.status_updates,
+                phc.status
+                    .as_ref()
+                    .map(|status| (status.offset_from_master, status.mean_path_delay)),
+            )
+        } else if let Some(master) = snapshot.ptp() {
+            (
+                Series::PtpMaster,
+                master.stats.samples,
+                master
+                    .last_sample
+                    .map(|sample| (sample.offset().delta(), sample.delay().delta() / 2)),
+            )
+        } else {
             return;
         };
-        if self.samples.len() >= usize::from(BARS) {
-            let _: Option<Sample> = self.samples.pop_front();
+        if count <= self.seen {
+            return;
         }
-        self.samples.push_back(sample);
+        self.series = series;
+        self.seen = count;
+        let Some(pair) = value else {
+            return;
+        };
+        if self.values.len() >= usize::from(BARS) {
+            let _: Option<(TimeDelta, TimeDelta)> = self.values.pop_front();
+        }
+        self.values.push_back(pair);
     }
 }
 
@@ -72,25 +114,27 @@ pub(crate) struct Trend {
     pub min: String,
 }
 
-/// 履歴からオフセットと遅延のグラフを作る。まだ測定値がなければ空。
+/// 履歴から 2 つの系列のグラフを作る。まだ測定値がなければ空。
 pub(super) fn trends(history: &SampleHistory) -> Vec<Trend> {
-    if history.samples.is_empty() {
+    if history.values.is_empty() {
         return Vec::new();
     }
-    let offsets: Vec<TimeDelta> = history
-        .samples
-        .iter()
-        .map(|sample| sample.offset().delta())
-        .collect();
-    let delays: Vec<TimeDelta> = history
-        .samples
-        .iter()
-        .map(|sample| sample.delay().delta())
-        .collect();
-    vec![
-        trend("オフセット", &offsets, format_offset_ms),
-        trend("遅延", &delays, format_delay_ms),
-    ]
+    let firsts: Vec<TimeDelta> = history.values.iter().map(|&(first, _)| first).collect();
+    let seconds: Vec<TimeDelta> = history.values.iter().map(|&(_, second)| second).collect();
+    match history.series {
+        Series::Ntp => vec![
+            trend("オフセット", &firsts, format_offset_ms),
+            trend("遅延", &seconds, format_delay_ms),
+        ],
+        Series::Ptp4l => vec![
+            trend("マスタとの差", &firsts, format_nanos_signed),
+            trend("経路遅延", &seconds, format_nanos),
+        ],
+        Series::PtpMaster => vec![
+            trend("PC との差", &firsts, format_nanos_signed),
+            trend("経路遅延", &seconds, format_nanos),
+        ],
+    }
 }
 
 fn trend(label: &'static str, values: &[TimeDelta], format: fn(TimeDelta) -> String) -> Trend {
@@ -211,7 +255,7 @@ pub(super) mod testing {
     use domain::shared_kernel::{LocalStamp, NtpTimestamp, PcTime, TimeDelta};
     use domain::time_sync::{ExchangeStats, Sample, SyncState};
 
-    use super::SampleHistory;
+    use super::{SampleHistory, SourceSnapshot};
 
     /// オフセット `offset_us`、往復遅延 `delay_us`（どちらもマイクロ秒）の測定値。
     pub(in super::super) fn sample(offset_us: i64, delay_us: i64) -> Sample {
@@ -262,7 +306,9 @@ pub(super) mod testing {
     pub(in super::super) fn history(values: &[(i64, i64)]) -> SampleHistory {
         let mut history = SampleHistory::default();
         for (&(offset_us, delay_us), successes) in values.iter().zip(1u64..) {
-            history.observe(&snapshot(successes, offset_us, delay_us));
+            history.observe(&SourceSnapshot::Ntp(Box::new(snapshot(
+                successes, offset_us, delay_us,
+            ))));
         }
         history
     }
@@ -272,13 +318,75 @@ pub(super) mod testing {
 mod tests {
     use super::*;
     use crate::format::display_width;
+    use application::snapshot::PhcSnapshot;
+    use domain::ptp_clock::{
+        ClockIdentity, ClockQuality, LeapWarning, PhcState, PhcStats, PtpStatus, TimeProperties,
+        TimeSourceKind, Timescale,
+    };
+    use domain::shared_kernel::PcTime;
+
+    /// ptp4l の状態を `updates` 回目に読んだ、マスタとの差が `offset_ns` のスナップショット。
+    fn phc_snapshot(updates: u64, offset_ns: i64) -> SourceSnapshot {
+        SourceSnapshot::Phc(Box::new(PhcSnapshot {
+            state: PhcState::Synchronized,
+            stats: PhcStats {
+                attempts: updates,
+                status_updates: updates,
+                ..PhcStats::default()
+            },
+            poll_interval: TimeDelta::from_millis(500),
+            anchor: None,
+            last_sample: None,
+            selected_sample: None,
+            frequency: None,
+            status: Some(PtpStatus {
+                domain: 0,
+                ports: Vec::new(),
+                offset_from_master: TimeDelta::from_nanos(offset_ns),
+                mean_path_delay: TimeDelta::from_nanos(1_234),
+                steps_removed: 1,
+                grandmaster: ClockIdentity::default(),
+                grandmaster_quality: ClockQuality::default(),
+                time: TimeProperties {
+                    utc_offset: 37,
+                    utc_offset_valid: true,
+                    timescale: Timescale::Ptp,
+                    leap: LeapWarning::None,
+                    time_traceable: true,
+                    frequency_traceable: true,
+                    time_source: TimeSourceKind::Gnss,
+                },
+            }),
+            status_error: None,
+            last_success: None,
+            next_poll: PcTime::monotonic(0),
+        }))
+    }
+
+    /// ptp4l の PHC: 読めた状態ごとに、マスタとの差と経路の遅延を貯める（ナノ秒で出す）。
+    #[test]
+    fn ptp4l_series_use_the_master_offset() {
+        let mut history = SampleHistory::default();
+        for (updates, offset_ns) in [(1u64, -12i64), (1, -12), (2, 30), (3, -5)] {
+            history.observe(&phc_snapshot(updates, offset_ns));
+        }
+        let built = trends(&history);
+        assert_eq!(built[0].label, "マスタとの差");
+        assert_eq!(
+            (built[0].max.as_str(), built[0].min.as_str()),
+            ("+30 ns", "-12 ns")
+        );
+        assert_eq!(built[0].levels.len(), 3, "同じ状態は 1 回だけ数える");
+        assert_eq!(built[1].label, "経路遅延");
+        assert_eq!(built[1].max, "1234 ns");
+    }
 
     fn offsets_us(history: &SampleHistory) -> Vec<i64> {
         history
-            .samples
+            .values
             .iter()
             // NTP の時刻の分解能（約 0.23ns）でずれるので、四捨五入してマイクロ秒にする
-            .map(|sample| (sample.offset().delta().as_nanos() + 500).div_euclid(1_000))
+            .map(|&(offset, _)| (offset.as_nanos() + 500).div_euclid(1_000))
             .collect()
     }
 
@@ -292,14 +400,16 @@ mod tests {
         // 1 回の成功で、イベントの数だけ同じスナップショットが届く
         let first = testing::snapshot(1, -978, 423);
         for _ in 0u8..3 {
-            history.observe(&first);
+            history.observe(&SourceSnapshot::Ntp(Box::new(first)));
         }
         // 失敗したときのスナップショット（成功回数は変わらない）
         let mut failed = first;
         failed.stats.attempts += 1;
         failed.stats.timeouts += 1;
-        history.observe(&failed);
-        history.observe(&testing::snapshot(2, -950, 400));
+        history.observe(&SourceSnapshot::Ntp(Box::new(failed)));
+        history.observe(&SourceSnapshot::Ntp(Box::new(testing::snapshot(
+            2, -950, 400,
+        ))));
         assert_eq!(offsets_us(&history), [-978, -950]);
     }
 

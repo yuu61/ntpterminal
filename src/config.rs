@@ -4,12 +4,12 @@
 //!   （コマンドラインと既定値だけ）として扱い、あるのに読めない・内容が正しくないときはエラーにする。
 //!   手元の `config.toml` を読ませたくない（スクリプトなど）ときは `--config /dev/null`（空の設定。Windows では `NUL`）を渡す
 //! - キーはコマンドラインの長いオプションと同じ名前で、値の書き方も同じ（`--interval-ms 200` → `interval-ms = 200`）。
-//!   tui / once / stats に共通のもの（サーバ・タイムゾーン・送信方式）は最上位に、
+//!   tui / once / stats に共通のもの（サーバ・タイムゾーン・送信方式・ptp4l の PHC・PTP のマスタ）は最上位に、
 //!   そのサブコマンドだけのものは `[tui]` などの節に書く。全項目の例は `docs/config.example.toml`、
 //!   各項目の値と既定値は `docs/configuration.md`
 //! - GNSS 受信機を SNMP で読む指定（`snmp-community` など）は `[tui]` に書く。コミュニティ名を書いたファイルは
 //!   ほかの人に読ませない
-//! - 優先順位はコマンドライン → 設定ファイル → 既定値。真偽の項目（`trend` / `json` / `no-df`）は
+//! - 優先順位はコマンドライン → 設定ファイル → 既定値。真偽の項目（`trend` / `json` / `no-df` / `ptp4l` / `ptp`）は
 //!   コマンドラインに付けるオプションしかないので、設定ファイルで true にしたものはコマンドラインで戻せない
 //! - 知らないキーはエラーにする（綴りの誤りを黙って無視しない）。値の範囲と形式はコマンドラインと同じ関数で
 //!   確かめ、誤りは行と列を添えて知らせる。値どうしの組み合わせ（udp で `dscp` など）は、コマンドラインの値と
@@ -18,9 +18,11 @@
 //!   短い間隔で問い合わせてしまうため、毎回コマンドラインで指定する
 
 use core::fmt::Display;
-use core::net::SocketAddr;
+use core::net::{Ipv4Addr, SocketAddr};
 use core::str::FromStr as _;
+use std::path::PathBuf;
 
+use application::usecase::PhcRequest;
 use domain::packet_crafting::{MacAddr, UdpChecksum};
 use presentation::format::DisplayZone;
 use serde::de::Error as _;
@@ -28,9 +30,10 @@ use serde::{Deserialize, Deserializer};
 use toml::de::Error as TomlError;
 
 use crate::{
-    Command, DSCP_MAX, ECN_MAX, MibArg, ModeArg, OnceArgs, PCP_MAX, RefId, SimMibArg,
-    SimServerArgs, SnmpArgs, StatsArgs, TargetArgs, TimestampingArg, TransportArgs, TuiArgs,
-    VLAN_ID_MAX, ZoneArgs, parse_hex_u16, parse_udp_checksum,
+    Command, DSCP_MAX, ECN_MAX, MibArg, ModeArg, OnceArgs, PCP_MAX, PtpArgs, RefId, SimMibArg,
+    SimPtpMasterArgs, SimServerArgs, SnmpArgs, StatsArgs, TargetArgs, TimestampingArg,
+    TransportArgs, TuiArgs, VLAN_ID_MAX, ZoneArgs, parse_hex_u16, parse_phc, parse_ptp_address,
+    parse_udp_checksum,
 };
 
 /// 設定ファイルの内容。どの項目も省略でき、省略したものはコマンドラインの値か既定値になる。
@@ -62,11 +65,24 @@ pub(crate) struct ConfigFile {
     vlan: Option<u16>,
     #[serde(deserialize_with = "pcp")]
     pcp: Option<u8>,
+    // ---- tui / once / stats に共通: ptp4l が合わせる PHC ----
+    ptp4l: Option<bool>,
+    ptp4l_socket: Option<PathBuf>,
+    ptp_domain: Option<u8>,
+    #[serde(deserialize_with = "phc")]
+    phc: Option<PhcRequest>,
+    // ---- tui / once / stats に共通: PTP のマスタ（スレーブとして問い合わせる） ----
+    ptp: Option<bool>,
+    ptp_interface: Option<String>,
+    #[serde(deserialize_with = "ptp_address")]
+    ptp_master: Option<SocketAddr>,
+    ptp_port: Option<u16>,
     // ---- サブコマンドごと ----
     tui: TuiSection,
     once: OnceSection,
     stats: StatsSection,
     sim_server: SimServerSection,
+    sim_ptp_master: SimPtpMasterSection,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -109,6 +125,20 @@ struct SimServerSection {
     snmp_bind: Option<SocketAddr>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields, rename_all = "kebab-case")]
+struct SimPtpMasterSection {
+    port: Option<u16>,
+    #[serde(deserialize_with = "ptp_address")]
+    to: Option<SocketAddr>,
+    interface: Option<Ipv4Addr>,
+    domain: Option<u8>,
+    offset_ms: Option<f64>,
+    one_step: Option<bool>,
+    #[serde(deserialize_with = "log_sync_interval")]
+    log_sync_interval: Option<i8>,
+}
+
 /// 設定ファイルの中身を読む。
 ///
 /// # Errors
@@ -128,6 +158,7 @@ impl ConfigFile {
             Command::Once(args) => Command::Once(self.fill_once(args)),
             Command::Stats(args) => Command::Stats(self.fill_stats(args)),
             Command::SimServer(args) => Command::SimServer(self.fill_sim_server(args)),
+            Command::SimPtpMaster(args) => Command::SimPtpMaster(self.fill_sim_ptp_master(args)),
         }
     }
 
@@ -142,6 +173,7 @@ impl ConfigFile {
             snmp,
             zone,
             transport,
+            ptp,
         } = args;
         let section = &self.tui;
         let SnmpArgs {
@@ -166,6 +198,7 @@ impl ConfigFile {
             },
             zone: self.fill_zone(zone),
             transport: self.fill_transport(transport),
+            ptp: self.fill_ptp(ptp),
         }
     }
 
@@ -175,6 +208,7 @@ impl ConfigFile {
             timeout_ms,
             zone,
             transport,
+            ptp,
         } = args;
         let section = &self.once;
         OnceArgs {
@@ -182,6 +216,7 @@ impl ConfigFile {
             timeout_ms: timeout_ms.or(section.timeout_ms),
             zone: self.fill_zone(zone),
             transport: self.fill_transport(transport),
+            ptp: self.fill_ptp(ptp),
         }
     }
 
@@ -192,6 +227,7 @@ impl ConfigFile {
             count,
             allow_fast_poll,
             transport,
+            ptp,
         } = args;
         let section = &self.stats;
         StatsArgs {
@@ -201,6 +237,7 @@ impl ConfigFile {
             // 設定ファイルには書けない（モジュールの説明を参照）
             allow_fast_poll,
             transport: self.fill_transport(transport),
+            ptp: self.fill_ptp(ptp),
         }
     }
 
@@ -224,6 +261,28 @@ impl ConfigFile {
         }
     }
 
+    fn fill_sim_ptp_master(&self, args: SimPtpMasterArgs) -> SimPtpMasterArgs {
+        let SimPtpMasterArgs {
+            port,
+            to,
+            interface,
+            domain,
+            offset_ms,
+            one_step,
+            log_sync_interval,
+        } = args;
+        let section = &self.sim_ptp_master;
+        SimPtpMasterArgs {
+            port: port.or(section.port),
+            to: to.or(section.to),
+            interface: interface.or(section.interface),
+            domain: domain.or(section.domain),
+            offset_ms: offset_ms.or(section.offset_ms),
+            one_step: one_step || section.one_step.unwrap_or(false),
+            log_sync_interval: log_sync_interval.or(section.log_sync_interval),
+        }
+    }
+
     /// `section_json` はサブコマンドの節（`[once]` / `[stats]`）の値。
     fn fill_target(&self, args: TargetArgs, section_json: Option<bool>) -> TargetArgs {
         let TargetArgs { server, json } = args;
@@ -238,6 +297,29 @@ impl ConfigFile {
         ZoneArgs {
             tz: tz.or(self.tz),
             tz_label: tz_label.or_else(|| self.tz_label.clone()),
+        }
+    }
+
+    fn fill_ptp(&self, args: PtpArgs) -> PtpArgs {
+        let PtpArgs {
+            ptp4l,
+            ptp,
+            ptp4l_socket,
+            ptp_domain,
+            phc,
+            ptp_interface,
+            ptp_master,
+            ptp_port,
+        } = args;
+        PtpArgs {
+            ptp4l: ptp4l || self.ptp4l.unwrap_or(false),
+            ptp: ptp || self.ptp.unwrap_or(false),
+            ptp4l_socket: ptp4l_socket.or_else(|| self.ptp4l_socket.clone()),
+            ptp_domain: ptp_domain.or(self.ptp_domain),
+            phc: phc.or_else(|| self.phc.clone()),
+            ptp_interface: ptp_interface.or_else(|| self.ptp_interface.clone()),
+            ptp_master: ptp_master.or(self.ptp_master),
+            ptp_port: ptp_port.or(self.ptp_port),
         }
     }
 
@@ -359,6 +441,34 @@ where
     up_to(deserializer, PCP_MAX)
 }
 
+fn phc<'de, D>(deserializer: D) -> Result<Option<PhcRequest>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    parsed(deserializer, parse_phc)
+}
+
+fn ptp_address<'de, D>(deserializer: D) -> Result<Option<SocketAddr>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    parsed(deserializer, parse_ptp_address)
+}
+
+/// Sync の間隔の log2（-7〜4。コマンドラインと同じ範囲）。
+fn log_sync_interval<'de, D>(deserializer: D) -> Result<Option<i8>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = i8::deserialize(deserializer)?;
+    if !(-7..=4).contains(&value) {
+        return Err(D::Error::custom(format!(
+            "-7〜4 で指定してください: {value}"
+        )));
+    }
+    Ok(Some(value))
+}
+
 fn refid<'de, D>(deserializer: D) -> Result<Option<RefId>, D::Error>
 where
     D: Deserializer<'de>,
@@ -403,10 +513,13 @@ mod tests {
             .join("\n")
     }
 
-    /// `key = value` の形か（キーは英小文字と `-` だけ。説明のコメントと区別する）。
+    /// `key = value` の形か（キーは英小文字で始まり、英小文字・数字・`-` だけ。説明のコメントと区別する）。
     fn is_setting(text: &str) -> bool {
         text.split_once(" = ").is_some_and(|(key, _)| {
-            !key.is_empty() && key.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-')
+            key.starts_with(|ch: char| ch.is_ascii_lowercase())
+                && key
+                    .chars()
+                    .all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '-')
         })
     }
 
@@ -444,6 +557,178 @@ mod tests {
         assert_eq!(file.tui.snmp_community.as_deref(), Some("public"));
         assert_eq!(file.tui.snmp_mib, Some(MibArg::Auto));
         assert_eq!(file.sim_server.snmp_mib, Some(SimMibArg::MeinbergLtng));
+        assert_eq!(file.ptp4l, Some(true));
+        assert_eq!(file.ptp_domain, Some(0));
+        assert_eq!(file.phc, Some(PhcRequest::Index(0)));
+    }
+
+    #[test]
+    fn ptp4l_settings_merge_and_conflicts_are_errors() {
+        let Command::Tui(args) = merged(
+            "ptp4l = true
+phc = \"eno1\"
+",
+            &["tui"],
+        ) else {
+            panic!("tui のはず");
+        };
+        assert!(args.ptp.ptp4l);
+        assert_eq!(args.ptp.phc, Some(PhcRequest::Interface("eno1".to_owned())));
+        args.ptp.check(None, &args.transport.given()).unwrap();
+
+        // ptp4l とサーバ・送信方式は一緒に使えない（設定ファイルの値でも）
+        let Command::Once(once) = merged(
+            "ptp4l = true
+transport = \"udp\"
+",
+            &["once", "192.168.1.123"],
+        ) else {
+            panic!("once のはず");
+        };
+        let server = once.ptp.check(once.target.server.as_deref(), &[]);
+        assert!(server.unwrap_err().to_string().contains("NTP サーバ"));
+        let transport = once.ptp.check(None, &once.transport.given());
+        assert!(transport.unwrap_err().to_string().contains("--transport"));
+
+        // ptp4l だけの指定は ptp4l なしではエラー
+        let Command::Stats(stats) = merged(
+            "ptp-domain = 24
+",
+            &["stats"],
+        ) else {
+            panic!("stats のはず");
+        };
+        let alone = stats.ptp.check(None, &[]).unwrap_err().to_string();
+        assert!(alone.contains("--ptp-domain"), "{alone}");
+
+        assert!(
+            parse_error(
+                "phc = \"/dev/ptpX\"
+"
+            )
+            .contains("/dev/ptp0 の形")
+        );
+        // 数字だけは /dev/ptpN の書き間違い（インターフェース名にしない）
+        assert!(
+            parse_error(
+                "phc = \"1\"
+"
+            )
+            .contains("/dev/ptp1 の形")
+        );
+    }
+
+    #[test]
+    fn ptp_master_settings_merge_and_conflicts_are_errors() {
+        let Command::Tui(args) = merged(
+            "ptp = true
+ptp-interface = \"eth0\"
+ptp-master = \"192.168.1.50\"
+timestamping = \"kernel\"
+",
+            &["tui", "--ptp-port", "12319"],
+        ) else {
+            panic!("tui のはず");
+        };
+        assert!(args.ptp.ptp);
+        assert_eq!(args.ptp.ptp_interface.as_deref(), Some("eth0"));
+        assert_eq!(args.ptp.ptp_master, Some("192.168.1.50:0".parse().unwrap()));
+        assert_eq!(args.ptp.ptp_port, Some(12319));
+        // --ptp では --timestamping は使える
+        args.ptp.check(None, &args.transport.given()).unwrap();
+
+        // --ptp とサーバ・送信方式・--ptp4l の項目は一緒に使えない
+        for (file, command, expected) in [
+            (
+                "ptp = true
+",
+                &["once", "192.168.1.123"][..],
+                "NTP サーバ",
+            ),
+            (
+                "ptp = true
+transport = \"udp\"
+",
+                &["once"],
+                "--transport",
+            ),
+            (
+                "ptp = true
+phc = \"/dev/ptp0\"
+",
+                &["once"],
+                "--phc は --ptp4l",
+            ),
+            (
+                "ptp = true
+ptp4l = true
+",
+                &["once"],
+                "一緒に指定できません",
+            ),
+            (
+                "ptp-port = 319
+",
+                &["once"],
+                "--ptp-port は --ptp",
+            ),
+            (
+                "ptp4l = true
+ptp-master = \"10.0.0.1\"
+",
+                &["once"],
+                "--ptp-master は --ptp",
+            ),
+        ] {
+            let Command::Once(once) = merged(file, command) else {
+                panic!("once のはず");
+            };
+            let error = once
+                .ptp
+                .check(once.target.server.as_deref(), &once.transport.given())
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{file}: {error}");
+        }
+
+        assert!(
+            parse_error(
+                "ptp-master = \"fe80::1\"
+"
+            )
+            .contains("IPv4")
+        );
+        assert!(
+            parse_error(
+                "ptp-master = \"master.local\"
+"
+            )
+            .contains("IPv4 アドレス")
+        );
+    }
+
+    #[test]
+    fn sim_ptp_master_settings_merge() {
+        assert!(
+            parse_error(
+                "[sim-ptp-master]
+log-sync-interval = 5
+"
+            )
+            .contains("-7〜4")
+        );
+        let Command::SimPtpMaster(sim) = merged(
+            "[sim-ptp-master]
+to = \"127.0.0.1:13319\"
+one-step = true
+",
+            &["sim-ptp-master", "--port", "12319"],
+        ) else {
+            panic!("sim-ptp-master のはず");
+        };
+        assert_eq!(sim.port, Some(12319));
+        assert_eq!(sim.to, Some("127.0.0.1:13319".parse().unwrap()));
+        assert!(sim.one_step);
     }
 
     /// オプションを足したのに設定ファイル（と例）に足し忘れることを防ぐ。
