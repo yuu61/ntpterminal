@@ -33,8 +33,8 @@ use serde::{Deserialize, Deserializer};
 use toml::de::Error as TomlError;
 
 use crate::{
-    Command, DSCP_MAX, ECN_MAX, MibArg, ModeArg, OnceArgs, PCP_MAX, PtpArgs, RefId, SimMibArg,
-    SimPtpMasterArgs, SimServerArgs, SnmpArgs, StatsArgs, TargetArgs, TimestampingArg,
+    Command, DSCP_MAX, ECN_MAX, MibArg, ModeArg, OnceArgs, PCP_MAX, PtpArgs, QrArg, RefId,
+    SimMibArg, SimPtpMasterArgs, SimServerArgs, SnmpArgs, StatsArgs, TargetArgs, TimestampingArg,
     TransportArgs, TuiArgs, VLAN_ID_MAX, ZoneArgs, parse_hex_u16, parse_phc, parse_ptp_address,
     parse_udp_checksum,
 };
@@ -97,6 +97,7 @@ struct TuiSection {
     #[serde(deserialize_with = "user_text")]
     footer: Option<String>,
     trend: Option<bool>,
+    qr: Option<QrArg>,
     snmp_community: Option<String>,
     snmp_port: Option<u16>,
     snmp_interval_ms: Option<u64>,
@@ -175,6 +176,7 @@ impl ConfigFile {
             title,
             footer,
             trend,
+            qr,
             snmp,
             zone,
             transport,
@@ -195,6 +197,7 @@ impl ConfigFile {
             title: title.or_else(|| section.title.clone()),
             footer: footer.or_else(|| section.footer.clone()),
             trend: trend || section.trend.unwrap_or(false),
+            qr: qr.or(section.qr),
             snmp: SnmpArgs {
                 community: community.or_else(|| section.snmp_community.clone()),
                 port: port.or(section.snmp_port),
@@ -565,6 +568,7 @@ mod tests {
             Some(MacAddr([0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff]))
         );
         assert_eq!(file.tui.trend, Some(true));
+        assert_eq!(file.tui.qr, Some(QrArg::BottomRight));
         assert_eq!(
             file.tui.footer.as_deref(),
             Some("Sponsored by ...\nBooth A-12")
@@ -722,6 +726,36 @@ ptp-master = \"10.0.0.1\"
 "
             )
             .contains("IPv4 アドレス")
+        );
+    }
+
+    #[test]
+    fn qr_corner_merges_and_unknown_corner_is_an_error() {
+        let file = "[tui]
+qr = \"top-left\"
+";
+        let Command::Tui(from_file) = merged(file, &["tui", "10.0.0.1"]) else {
+            panic!("tui のはず");
+        };
+        assert_eq!(from_file.qr, Some(QrArg::TopLeft));
+        let Command::Tui(from_cli) = merged(file, &["tui", "10.0.0.1", "--qr", "bottom-right"])
+        else {
+            panic!("tui のはず");
+        };
+        assert_eq!(from_cli.qr, Some(QrArg::BottomRight));
+        let Command::Tui(neither) = merged("", &["tui", "10.0.0.1"]) else {
+            panic!("tui のはず");
+        };
+        assert_eq!(neither.qr, None);
+        // 知らない隅は、行を添えてエラーにする
+        let error = parse_error(
+            "[tui]
+qr = \"center\"
+",
+        );
+        assert!(
+            error.contains("line 2") && error.contains("top-left"),
+            "{error}"
         );
     }
 

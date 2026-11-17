@@ -56,8 +56,8 @@ use presentation::cli::phc::{self, PhcStatsReporter, PhcTarget};
 use presentation::cli::stats::StatsReporter;
 use presentation::format::{DisplayZone, timestamping_label, transport_label};
 use presentation::tui::{
-    self, MasterSnapshotSender, PhcSnapshotSender, SnapshotSender, SourceSnapshot, TuiConfig,
-    TuiSource,
+    self, MasterSnapshotSender, PhcSnapshotSender, QrCorner, SnapshotSender, SourceSnapshot,
+    TuiConfig, TuiSource,
 };
 use serde::Deserialize;
 
@@ -459,6 +459,31 @@ fn parse_udp_checksum(text: &str) -> Result<UdpChecksum, String> {
     }
 }
 
+/// QR コードを出す隅。設定ファイルでの綴りは、コマンドラインの値と同じ（`bottom-right` など）。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+enum QrArg {
+    /// 左上
+    TopLeft,
+    /// 右上
+    TopRight,
+    /// 左下
+    BottomLeft,
+    /// 右下
+    BottomRight,
+}
+
+impl QrArg {
+    const fn corner(self) -> QrCorner {
+        match self {
+            Self::TopLeft => QrCorner::TopLeft,
+            Self::TopRight => QrCorner::TopRight,
+            Self::BottomLeft => QrCorner::BottomLeft,
+            Self::BottomRight => QrCorner::BottomRight,
+        }
+    }
+}
+
 /// 読む MIB。設定ファイルでの綴りは、コマンドラインの値と同じ（`meinberg-ltng` など）。
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, ValueEnum, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -639,6 +664,9 @@ struct TuiArgs {
     /// 直近の測定値の推移（オフセットと遅延の棒グラフ）を出す。時計が縮まない大きさの端末でだけ出る
     #[arg(long)]
     trend: bool,
+    /// このリポジトリの URL の QR コードを、画面のこの隅に出す（33 桁 × 17 行）。隅が空いている端末でだけ出る
+    #[arg(long, value_name = "CORNER")]
+    qr: Option<QrArg>,
     #[command(flatten)]
     snmp: SnmpArgs,
     #[command(flatten)]
@@ -798,6 +826,7 @@ fn run_tui(args: &TuiArgs) -> anyhow::Result<ExitCode> {
         server_label: started.label,
         footer: args.footer.clone(),
         trend: args.trend,
+        qr: args.qr.map(QrArg::corner),
         zone: args.zone.zone(),
         source: started.source,
     };

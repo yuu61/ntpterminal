@@ -70,6 +70,9 @@
 # title = "NTP CLOCK"
 # footer = 'Sponsored by ...\nBooth A-12'
 # trend = true
+# このリポジトリの URL の QR コードを出す隅: top-left / top-right / bottom-left / bottom-right（書かなければ出さない）。
+# 隅がほかの表示と重ならない大きさの端末でだけ出る
+# qr = "bottom-right"
 
 # GNSS 受信機の状態を SNMP v2c で読む（NTP サーバと同じホストに問い合わせる）。
 # snmp-community を書くと読む。ほかの snmp-* を snmp-community なしで書くとエラー

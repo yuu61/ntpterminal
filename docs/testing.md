@@ -74,6 +74,17 @@ MIB は自動で判定する。`tui --snmp-mib` で固定もでき、固定し�
 情報欄の下の `Last N samples`（推移のグラフ）は、`tui --trend` を付けたときだけ出す（既定では出さない）。
 付けても、出して時計の倍率が変わらない大きさの端末でだけ出る。120×40 なら出るが、80×24 では出ない。
 
+## QR コード
+
+`tui --qr bottom-right` などで、このリポジトリの URL の QR コードを隅に出す。隅がほかの表示と重なると出ないので、
+120×40 以上の端末で推移なしにして確かめる。スマートフォンのカメラで読み取り、`https://github.com/yuu61/ntpterminal`
+が開くかを見る（テストで確かめているのは、描いたセルから読み戻したモジュールが QR の生成結果と一致するところまで）。
+
+```sh
+cargo run -- sim-server
+cargo run -- --config /dev/null tui 127.0.0.1:12300 --qr bottom-right   # 別の端末で
+```
+
 ## ハードウェアタイムスタンプ（NIC の時計）
 
 `--timestamping hardware` は NIC の PHC の時刻を使う。CI には PHC を持つ NIC がないので、実機で確かめる

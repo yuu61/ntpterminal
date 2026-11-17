@@ -1,4 +1,4 @@
-//! TUI: 大きい時計・情報欄・測定値の推移。
+//! TUI: 大きい時計・情報欄・測定値の推移・リポジトリの QR コード。
 //!
 //! 画面の文言は英語（`text` の先頭）。CLI の文言（日本語）とは別に持つ。
 //!
@@ -13,6 +13,7 @@ mod app;
 mod big_digits;
 mod master;
 mod phc;
+mod qr;
 mod receiver;
 mod screen;
 mod snapshot_sender;
@@ -22,6 +23,7 @@ mod trend;
 mod user_text;
 
 pub use app::run;
+pub use qr::QrCorner;
 pub use receiver::mib_label;
 pub use snapshot_sender::{MasterSnapshotSender, PhcSnapshotSender, SnapshotSender};
 pub use text::{master_server_label, phc_server_label};
@@ -125,6 +127,8 @@ pub struct TuiConfig {
     pub footer: Option<String>,
     /// 測定値の推移のグラフを出すか（既定では出さない）
     pub trend: bool,
+    /// リポジトリの URL の QR コードを置く隅。`None` なら出さない（既定）。ほかの表示と重なるときも出さない
+    pub qr: Option<QrCorner>,
     pub zone: DisplayZone,
     pub source: TuiSource,
 }

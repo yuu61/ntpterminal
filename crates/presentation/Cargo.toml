@@ -13,6 +13,7 @@ name = "presentation"
 [dependencies]
 domain.workspace = true
 application.workspace = true
+qrcodegen.workspace = true
 ratatui.workspace = true
 serde_json.workspace = true
 

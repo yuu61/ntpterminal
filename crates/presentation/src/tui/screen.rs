@@ -17,7 +17,10 @@ use domain::time_sync::SyncState;
 
 use super::big_digits::{self, BigText};
 use super::trend::{self, SampleHistory, Trend};
-use super::{SourceSnapshot, TuiConfig, TuiSource, master, phc, receiver, text, theme, user_text};
+use super::{
+    QrCorner, SourceSnapshot, TuiConfig, TuiSource, master, phc, qr, receiver, text, theme,
+    user_text,
+};
 use crate::format::{DisplayZone, format_clock, format_delay_ms, format_offset_ms};
 
 /// 同期前の時計の表示。
@@ -54,6 +57,8 @@ pub(crate) struct ScreenModel {
     pub trends: Vec<Trend>,
     /// 最下部の一文の行（タブを空白にしたもの）。空なら出さない
     pub footer: Vec<String>,
+    /// リポジトリの QR コードを置く隅。`None` なら出さない
+    pub qr: Option<QrCorner>,
 }
 
 /// スナップショットと現在時刻から、画面に出す内容を組み立てる。
@@ -136,6 +141,7 @@ pub(super) fn build(
                 .map(user_text::expand_tabs)
                 .collect()
         }),
+        qr: config.qr,
     }
 }
 
@@ -309,6 +315,7 @@ impl Widget for &ScreenModel {
     fn render(self, area: Rect, buf: &mut Buffer) {
         // 縦の並び: 見出し（行の数） / サーバ / 空行 / 時計 / 空行 / 日付 / 状態 / 情報欄 /
         //           (空行 / 推移) / (空行 / 最下部の一文（行の数）)
+        // QR コードは並びに入れず、空いている隅にだけ重ねる
         let footer_rows = if self.footer.is_empty() {
             0
         } else {
@@ -397,6 +404,13 @@ impl Widget for &ScreenModel {
             &self.footer,
             Style::new().fg(theme::FOOTER),
         );
+
+        // QR コードは最後に描き、隅がほかの表示と重ならないときだけ出す（`qr` の先頭）
+        if let Some(corner) = self.qr
+            && let Some(code) = qr::repository_qr()
+        {
+            qr::render(code, corner, area, buf);
+        }
     }
 }
 
@@ -470,6 +484,8 @@ mod tests {
     use domain::time_sync::{
         Anchor, ExchangeStats, LeapIndicator, ReferenceId, Sample, SampleError, ServerInfo, Stratum,
     };
+    use ratatui::buffer::Cell;
+    use ratatui::layout::Position;
 
     /// 2026-11-15 17:25:37.923 JST
     fn server_time() -> NtpTimestamp {
@@ -492,6 +508,7 @@ mod tests {
             footer: footer.map(str::to_owned),
             zone: DisplayZone::jst(),
             trend: false,
+            qr: None,
             source: TuiSource::Ntp {
                 receiver: false,
                 transport: udp(),
@@ -712,6 +729,109 @@ mod tests {
         // 最下部の一文は推移より下に出る
         let row_of = |needle: &str| lines.iter().position(|line| line.contains(needle)).unwrap();
         assert!(row_of("Last 3 samples") < row_of("Sponsored by Example Inc."));
+    }
+
+    const ALL_CORNERS: [QrCorner; 4] = [
+        QrCorner::TopLeft,
+        QrCorner::TopRight,
+        QrCorner::BottomLeft,
+        QrCorner::BottomRight,
+    ];
+
+    /// QR コードを `corner` に置く設定。
+    fn with_qr(config: TuiConfig, corner: QrCorner) -> TuiConfig {
+        TuiConfig {
+            qr: Some(corner),
+            ..config
+        }
+    }
+
+    /// 同期済みの画面を `width`×`height` に描く。
+    fn draw_synced(config: &TuiConfig, width: u16, height: u16) -> Buffer {
+        let snapshot = synced_snapshot();
+        let now = seven_seconds_later();
+        let shown = snapshot.anchor.unwrap().project(now).unwrap();
+        let model = build(
+            config,
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
+            None,
+            &recent_history(),
+            Some(shown),
+            now,
+        );
+        let area = Rect::new(0, 0, width, height);
+        let mut buf = Buffer::empty(area);
+        model.render(area, &mut buf);
+        buf
+    }
+
+    /// 同期済みの画面を、QR コードを出す設定と出さない設定で描いて比べ、QR コードを描いた範囲を返す
+    /// （描かなかったら `None`）。変わったセルが 1 つの長方形を埋めること、その長方形が QR コードを出さない画面では
+    /// 空いていたこと（ほかの表示を消さず、時計の大きさも変えない）も確かめる。
+    fn qr_area(config: &TuiConfig, corner: QrCorner, width: u16, height: u16) -> Option<Rect> {
+        let plain = draw_synced(config, width, height);
+        let with_code = draw_synced(&with_qr(config.clone(), corner), width, height);
+        let changed: Vec<Position> = plain
+            .area
+            .positions()
+            .filter(|&position| with_code[position] != plain[position])
+            .collect();
+        let left = changed.iter().map(|position| position.x).min()?;
+        let top = changed.iter().map(|position| position.y).min()?;
+        let right = changed.iter().map(|position| position.x).max()?;
+        let bottom = changed.iter().map(|position| position.y).max()?;
+        let rect = Rect::new(left, top, right - left + 1, bottom - top + 1);
+        assert_eq!(rect.positions().count(), changed.len(), "{rect:?}");
+        assert!(
+            rect.positions()
+                .all(|position| plain[position] == Cell::EMPTY),
+            "{rect:?}"
+        );
+        Some(rect)
+    }
+
+    /// QR コードは空いている隅にぴったり置く（33 桁 × 17 行）。
+    #[test]
+    fn qr_code_goes_to_a_free_corner() {
+        let footer = config(Some("Sponsored by Example Inc."));
+        // 120×40 で推移を出さなければ、下の隅が空いている
+        assert_eq!(
+            qr_area(&footer, QrCorner::BottomRight, 120, 40),
+            Some(Rect::new(87, 23, 33, 17))
+        );
+        assert_eq!(
+            qr_area(&footer, QrCorner::BottomLeft, 120, 40),
+            Some(Rect::new(0, 23, 33, 17))
+        );
+        // 縦に余裕のある端末なら、推移を出していても 4 隅のどこにでも置ける
+        for (corner, x, y) in [
+            (QrCorner::TopLeft, 0, 0),
+            (QrCorner::TopRight, 167, 0),
+            (QrCorner::BottomLeft, 0, 63),
+            (QrCorner::BottomRight, 167, 63),
+        ] {
+            assert_eq!(
+                qr_area(&with_trend(footer.clone()), corner, 200, 80),
+                Some(Rect::new(x, y, 33, 17)),
+                "{corner:?}"
+            );
+        }
+    }
+
+    /// 隅がほかの表示と重なるなら出さない（時計を縮めてまで出さない）。
+    #[test]
+    fn qr_code_is_hidden_when_the_corner_is_taken() {
+        let footer = config(Some("Sponsored by Example Inc."));
+        for corner in ALL_CORNERS {
+            // 80×24 では時計と情報欄で埋まる
+            assert_eq!(qr_area(&footer, corner, 80, 24), None, "{corner:?}");
+            // 120×40 で推移を出すと、上の隅は時計と、下の隅は推移と重なる
+            assert_eq!(
+                qr_area(&with_trend(footer.clone()), corner, 120, 40),
+                None,
+                "{corner:?}"
+            );
+        }
     }
 
     /// 見出しと最下部の一文は、改行で複数行になり（末尾の改行は数えない）、行ごとに左右中央に置く。

@@ -156,6 +156,7 @@ trend = true
 | `--title`            | `title`            | 文字列（`\n`・`\t` を使える） | `NTP CLOCK`（`--ptp4l`・`--ptp` のときは `PTP CLOCK`） | 画面最上部の見出し。改行で複数行にできる          |
 | `--footer`           | `footer`           | 文字列（`\n`・`\t` を使える） | なし        | 画面最下部に表示する文（スポンサー表記など）。改行で複数行にできる |
 | `--trend`            | `trend`            | フラグ      | 無効        | 推移のグラフを表示する。時計が小さくならない大きさの端末でのみ表示される |
+| `--qr`               | `qr`               | `top-left`、`top-right`、`bottom-left`、`bottom-right` | なし（表示しない） | このリポジトリの URL の QR コードを、指定した画面の隅に表示する。隅がほかの表示と重ならない大きさの端末でのみ表示される（[usage.md](usage.md) の tui の項） |
 | `--snmp-community`   | `snmp-community`   | 文字列      | なし        | 指定すると、GNSS 受信機の状態を SNMP v2c で取得する。コミュニティ名は画面に表示しない |
 | `--snmp-port`        | `snmp-port`        | ポート番号  | 161         | SNMP の宛先ポート（宛先ホストは NTP サーバと同じ）           |
 | `--snmp-interval-ms` | `snmp-interval-ms` | ミリ秒      | 5000        | 受信機の状態を取得する間隔。1000 未満を指定すると 1000 になる |

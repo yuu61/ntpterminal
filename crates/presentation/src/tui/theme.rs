@@ -21,3 +21,8 @@ pub(super) const BAD: Color = Color::LightRed;
 pub(super) const FOOTER: Color = Color::Yellow;
 /// 測定値の推移の棒（大きい時計の色と分ける）
 pub(super) const TREND: Color = Color::Cyan;
+/// QR コードの暗いモジュール
+pub(super) const QR_DARK: Color = Color::Black;
+/// QR コードの明るいモジュールと周りの余白。背景にも使うので、Linux コンソールの背景に出せる 8 色から選ぶ
+/// （`White` は明るい色の側で、背景には出ない）
+pub(super) const QR_LIGHT: Color = Color::Gray;
