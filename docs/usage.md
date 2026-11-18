@@ -26,10 +26,13 @@
   `Holdover (no reply)` となり、最後に同期した時刻から時計を進め続ける（PC とサーバの時計の進み方の差を、
   それまでの測定から推定して補正する）。サーバに拒否された場合（KoD の DENY / RSTR）は
   `Denied by server (KoD)` となり、問い合わせを停止する
-- **情報欄**: Offset（オフセット）、Delay（遅延）、Stratum、Ref ID、NTP version、Server time（サーバ時刻）、
-  Last sync（最終同期）、Next poll（次回取得）、Success/Tries（成功/試行）、Transport（送信方式）、
-  Timestamps（タイムスタンプ）を表示する。オフセットと遅延には、直近の測定のうち遅延が小さく新しいもの
-  （時計の基準に使っているもの）の値を使う。値が 1 ms 未満なら緑、10 ms 未満なら黄、それ以上なら赤で表示する
+- **情報欄**: Offset（オフセット）、Delay（遅延）、Root delay（サーバと基準時計の間の往復遅延）、Stratum、Ref ID、
+  Server time（サーバ時刻）、Last sync（最終同期）、Next poll（次回取得）、Success/Tries（成功/試行）、
+  Transport（送信方式）、Timestamps（タイムスタンプ）を表示する。オフセットと遅延には、直近の測定のうち遅延が
+  小さく新しいもの（時計の基準に使っているもの）の値を使う。Delay はこの PC とサーバの間だけの値なので、
+  stratum 2 以上のサーバでは Root delay も合わせて見る（Delay が小さくても、サーバの時刻そのものが基準時計から
+  ずれている可能性がある。経路の非対称だけでも、最大で Root delay の半分ずれうる）。Root delay はサーバの応答に入っている値で、`once` の Root delay と同じ。NTP version は `once` にだけ
+  表示する。オフセット・遅延・Root delay は、値が 1 ms 未満なら緑、10 ms 未満なら黄、それ以上なら赤で表示する
 - **推移のグラフ**: `--trend` を付けると、情報欄の下にオフセットと遅延の推移を棒グラフで表示する。
   グラフを表示しても時計が小さくならない大きさの端末でのみ表示される（120×40 なら表示され、80×24 では表示されない）
 - **QR コード**: `--qr <隅>`（`top-left`・`top-right`・`bottom-left`・`bottom-right`）を付けると、このリポジトリの

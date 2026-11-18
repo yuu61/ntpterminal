@@ -158,6 +158,9 @@ fn ntp_status(snapshot: Option<&SyncSnapshot>) -> (String, Color) {
 }
 
 /// NTP の情報欄。受信機の行（`show_receiver` のとき）は、基準時計に関わる「Ref ID」の後ろに置く。
+///
+/// 行は 80×24 で最下部の一文と受信機の行を付けても大きい時計が入る数（11 行）にしている。
+/// NTP version（ほぼ常に 4）は `once` にだけ出し、ここには出さない。
 fn info_rows(
     snapshot: Option<&SyncSnapshot>,
     show_receiver: bool,
@@ -179,6 +182,9 @@ fn info_rows(
     };
     let offset = selected.map(|sample| sample.offset().delta());
     let delay = selected.map(|sample| sample.delay().delta());
+    // Delay はこの PC とサーバの間だけ。サーバが stratum 2 以上なら、サーバと基準時計の間の遅延（root delay）を
+    // 並べないと、Delay だけを見て基準時計の時刻に近いと誤解される
+    let root_delay = info.map(|i| i.root_delay);
     let next_poll = match snapshot {
         Some(snap) if snap.state == SyncState::Denied => Some("Stopped".to_owned()),
         Some(snap) => snap
@@ -200,6 +206,11 @@ fn info_rows(
             delay.map_or(theme::TEXT, tone),
         ),
         row(
+            "Root delay",
+            root_delay.map(format_delay_ms),
+            root_delay.map_or(theme::TEXT, tone),
+        ),
+        row(
             "Stratum",
             info.map(|i| i.stratum.value().to_string()),
             if info.is_some_and(|i| i.stratum.is_primary()) {
@@ -218,11 +229,6 @@ fn info_rows(
         rows.extend(receiver::rows(receiver, now));
     }
     rows.extend([
-        row(
-            "NTP version",
-            info.map(|i| i.version.to_string()),
-            theme::TEXT,
-        ),
         row(
             "Server time",
             last.map(|sample| format_clock(sample.server_transmit(), zone)),
@@ -637,15 +643,45 @@ mod tests {
         };
         assert_eq!(value("Offset"), "-0.978 ms");
         assert_eq!(value("Delay"), "0.423 ms");
+        assert_eq!(value("Root delay"), "0.000 ms");
         assert_eq!(value("Stratum"), "1");
         assert_eq!(value("Ref ID"), "GNSS");
-        assert_eq!(value("NTP version"), "4");
         assert_eq!(value("Last sync"), "7.0 s ago");
         assert_eq!(value("Next poll"), "in 9.0 s");
         assert_eq!(value(SUCCESS_LABEL), "687/687");
         assert_eq!(value("Transport"), "UDP socket");
         assert_eq!(value("Timestamps"), "User space");
         assert_eq!(model.date.as_deref(), Some("2026-11-15 (Sun)"));
+        let labels: Vec<&str> = model.rows.iter().map(|row| row.label).collect();
+        assert_eq!(labels[..3], ["Offset", "Delay", "Root delay"]);
+        assert!(!labels.contains(&"NTP version"));
+    }
+
+    /// stratum 2 のサーバ（例: 公開サーバに合わせた chrony）。Delay が小さくても、サーバと基準時計の間の
+    /// root delay を Delay の下に、Delay と同じ基準の色で出す。
+    #[test]
+    fn shows_root_delay_of_a_secondary_server() {
+        let mut snapshot = synced_snapshot();
+        snapshot.server_info = snapshot.server_info.map(|info| ServerInfo {
+            stratum: Stratum::new(2),
+            root_delay: TimeDelta::from_nanos(4_974_117),
+            reference_id: ReferenceId::interpret(Stratum::new(2), [61, 205, 120, 130]),
+            ..info
+        });
+        let model = build(
+            &config(None),
+            Some(&SourceSnapshot::Ntp(Box::new(snapshot))),
+            None,
+            &SampleHistory::default(),
+            None,
+            seven_seconds_later(),
+        );
+        let row = |label: &str| model.rows.iter().find(|row| row.label == label).unwrap();
+        assert_eq!(row("Delay").value, "0.423 ms");
+        assert_eq!(row("Delay").color, theme::GOOD);
+        assert_eq!(row("Root delay").value, "4.974 ms");
+        assert_eq!(row("Root delay").color, theme::WARN);
+        assert_eq!(row("Ref ID").value, "61.205.120.130");
     }
 
     #[test]
